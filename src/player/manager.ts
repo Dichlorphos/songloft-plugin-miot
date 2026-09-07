@@ -50,6 +50,31 @@ const EXTERNAL_RESUME_POLL_MAX_MS = 600000;
 const EXTERNAL_RESUME_CONFIRM_COUNT = 2;
 
 /**
+ * URL 下发「假失败」核实参数（songloft-org/songloft-plugin-miot#98）。
+ *
+ * 小米云端抖动时 ubus 会返回 `code=101` + `device_data code=3012 远程控制超时`——
+ * 那只说明**云端没等到设备回执**，指令往往已经到设备并正常起播了。旧实现把它当硬失败，
+ * advanceToNext 重试一次、跳一首、再失败就 state='stopped'，切歌定时器从此不再注册，
+ * 音箱把当前这首播完就再没有下一首，表现为「歌单还有歌但播完某首就停」。
+ *
+ * 与 verifyResumeOrRepush 是对称的两半：那边防「ubus 说成功但没真播上」，
+ * 这边防「ubus 说失败但其实已播上」。节奏也对齐（2 次 × 1.2s，最多 ~2.4s）。
+ */
+const PUSH_VERIFY_ATTEMPTS = 2;
+const PUSH_VERIFY_DELAY_MS = 1200;
+/**
+ * 「刚起播」窗口：核实时设备的流内位置必须还落在流开头，否则不认这次下发已生效。
+ *
+ * 两个作用：① 设备不上报流长（matchDeviceStream 只能返回 'unknown'，见 #60 机型）时它是
+ * 唯一判据；② 挡掉流长身份校验放过的「上一首还在播」——那道校验的容差是「5 秒或 5%」的大者，
+ * 相邻两首时长接近时（#98 日志里 247s 与 253s，容差 12.65s）会被判成 'ours'。
+ *
+ * 取 30s：真落地的推流从设备起播到这里最多几秒（play-url 超时余量 ~3.5s + 核实 1.2s），
+ * 余量充足；而上一首若还在播，位置通常已在几十秒开外。
+ */
+const PUSH_VERIFY_START_WINDOW_SEC = 30;
+
+/**
  * duration==0 时的兜底切歌探测参数（songloft-org/songloft#437）。
  *
  * 歌曲元数据 duration==0 是常态（远程/插件歌曲元数据未刷新，见后端 seek_stream.go 注释），
@@ -642,16 +667,25 @@ export class PlaylistManager {
    * 必须退回调用方原有的保守行为，不能误判成 'foreign' 把好端端在放的歌打断重推。
    *
    * @param state getPlayState() 的返回值（duration 为设备上报的流长，秒）
+   * @param expect 期望的流参数；缺省取当前已生效的 streamSeekOffsetSec / playbackSpeed。
+   *   verifyPushLanded 必须显式传入本次下发的值——它在 playCurrent 的失败分支里调用，
+   *   那两个字段还停在**上一首**的值上（只有成功分支才赋新值），不传就会算错期望流长。
    * @returns 'ours' 我们的流 / 'foreign' 被别的媒体接管 / 'unknown' 信息不足
    */
-  matchDeviceStream(state: { status: number; duration: number }): 'ours' | 'foreign' | 'unknown' {
+  matchDeviceStream(
+    state: { status: number; duration: number },
+    expect?: { seekSeconds?: number; speed?: number },
+  ): 'ours' | 'foreign' | 'unknown' {
     const song = this.getCurrentSong();
     if (state.status !== 1 || !song || song.duration <= 0 || state.duration <= 0) {
       return 'unknown';
     }
 
-    // 我们推的流：从 streamSeekOffsetSec 开始、按 playbackSpeed 压缩后的长度
-    const expected = (song.duration - this.streamSeekOffsetSec) / this.playbackSpeed;
+    const seekOffset = typeof expect?.seekSeconds === 'number' ? expect.seekSeconds : this.streamSeekOffsetSec;
+    const speed = typeof expect?.speed === 'number' && expect.speed > 0 ? expect.speed : this.playbackSpeed;
+
+    // 我们推的流：从 seekOffset 开始、按 speed 压缩后的长度
+    const expected = (song.duration - seekOffset) / speed;
     if (expected <= 0) return 'unknown';
 
     // 容差取「5 秒或 5%」的大者：转码取整、倍速换算、设备四舍五入都会带来几秒误差。
@@ -1160,9 +1194,17 @@ export class PlaylistManager {
       title: song.title,
       artist: song.artist,
     }));
+    // 下发报失败不等于设备没播：3012「远程控制超时」是假失败，指令往往已经生效（#98）。
+    // 回读设备核实，确认在播我们的流就按成功走，避免上层重试/跳歌/停摆。
+    // landedPositionSec >= 0 表示「核实为假失败」，其值是设备已经播到的流内位置。
+    let landedPositionSec = -1;
     if (!ok) {
-      songloft.log.error('[PlaylistManager] Failed to play URL on any target device');
-      return false;
+      landedPositionSec = await this.verifyPushLanded(seekSeconds, effectiveSpeed);
+      if (landedPositionSec < 0) {
+        songloft.log.error('[PlaylistManager] Failed to play URL on any target device');
+        return false;
+      }
+      songloft.log.warn(`[PlaylistManager] playURL reported failure but device is playing our stream (position=${landedPositionSec}s), treating as success`);
     }
 
     this.clearVoiceSuspend();
@@ -1171,16 +1213,22 @@ export class PlaylistManager {
     this.pausedPositionSec = 0;
     this.streamSeekOffsetSec = seekSeconds;
     this.playbackSpeed = effectiveSpeed;
+    // 起播基准（曲内绝对秒）：正常路径就是 seekSeconds。走了假失败核实的话，ubus 超时 3.5s
+    // 加核实 2.4s 期间设备早就在播了，必须按设备实测位置前移，否则锚点和定时器都比设备真实
+    // 进度早 ~6 秒（进度条超前、歌尾被截）。设备上报的 position 是流内位置，× speed 换成曲内秒。
+    const startedAtSec = landedPositionSec > 0
+      ? seekSeconds + landedPositionSec * effectiveSpeed
+      : seekSeconds;
     // 锚点按 1/speed 反向缩放：getPosition() 里再把墙钟差 × speed 还原成曲内位置。
-    // speed=1 时退化为旧式 Date.now() - seekSeconds*1000，兼容旧行为。
-    this.playStartTimeMs = Date.now() - (seekSeconds / effectiveSpeed) * 1000;
+    // speed=1 时退化为旧式 Date.now() - startedAtSec*1000，兼容旧行为。
+    this.playStartTimeMs = Date.now() - (startedAtSec / effectiveSpeed) * 1000;
 
     // 如果歌曲时长有效，注册定时器播放下一首（seek 起播时只等剩余时长）。
     // adjustedDuration 是曲内剩余秒数，定时器按墙钟等：倍速下曲内 N 秒只需 N/speed 墙钟秒。
     const offset = config.song_transition_offset || 0;
     this.transitionOffset = offset;
     if (song.duration > 0) {
-      const adjustedDuration = Math.max(1, song.duration + offset - seekSeconds);
+      const adjustedDuration = Math.max(1, song.duration + offset - startedAtSec);
       this.startCheckTimer(adjustedDuration / effectiveSpeed);
     } else {
       // duration==0 是常态（远程/插件歌曲元数据未刷新）。无法直接按曲长注册定时器，
@@ -1193,6 +1241,67 @@ export class PlaylistManager {
     this.prefetchNextSong();
 
     return true;
+  }
+
+  /**
+   * 回读设备，判断「下发报失败」是不是假失败（songloft-org/songloft-plugin-miot#98）。
+   *
+   * 为什么必须核实：ubus 的 `code=101` + `device_data code=3012 远程控制超时` 只说明
+   * **云端没等到设备回执**。#98 的日志里三次 play-url 全报这个错，而音箱把最后那个 URL
+   * 完整播完了——插件却已经 state='stopped'、定时器不再注册，播完就彻底没有下一首。
+   *
+   * status<0（查询也失败）时**按失败处理**，与 verifyResumeOrRepush 刻意相反：那边是
+   * 「拿不到证据就别打断正在放的歌」，这边是「拿不到证据就别把没播上的当成播上了」，
+   * 而且网络全断时立刻返回、不再耗满 2.4s 拖慢上层的重试链。真漏判了还有
+   * advanceToNext 末尾的 startResumePoll 兜着。
+   *
+   * 只查主设备：分组成员各自的媒体上下文无法逐台核实，与 verifyResumeOrRepush 同一取舍。
+   *
+   * @param seekSeconds 本次下发的曲内起播位置
+   * @param speed 本次下发的倍速
+   * @returns 假失败时返回设备已播到的流内位置（秒，可能为 0）；判定为真失败返回 -1
+   */
+  private async verifyPushLanded(seekSeconds: number, speed: number): Promise<number> {
+    // 记下核实开始时在放哪一首：期间用户可能切歌/换歌单，那就不该再替这次下发翻案
+    const indexAtPush = this.currentIndex;
+    const songIdAtPush = this.getCurrentSong()?.id ?? 0;
+    const stateAtPush = this.state;
+
+    for (let i = 0; i < PUSH_VERIFY_ATTEMPTS; i++) {
+      await new Promise(r => setTimeout(r, PUSH_VERIFY_DELAY_MS));
+      if (this.currentIndex !== indexAtPush || (this.getCurrentSong()?.id ?? 0) !== songIdAtPush) {
+        return -1;
+      }
+      // 核实要等 ~2.4s，期间用户可能按了停止/暂停。翻案会让 playCurrent 把 state 改回 playing
+      // 并注册定时器，等于把用户刚停下的播放又拉起来——宁可维持失败。
+      if (this.state !== stateAtPush && (this.state === 'stopped' || this.state === 'paused')) {
+        songloft.log.info(`[PlaylistManager] Push verify: state changed to ${this.state} meanwhile, keeping failure`);
+        return -1;
+      }
+
+      const state = await this.minaService.getPlayState(this.accountId, this.deviceId);
+      if (state.status < 0) {
+        songloft.log.warn('[PlaylistManager] Push verify: device status unavailable, keeping failure');
+        return -1;
+      }
+      if (state.status !== 1) continue;
+
+      // status=1 只代表音箱在放某个东西：小爱接管播它自己的内容时同样是 1，
+      // 上一首没停干净也是 1。必须过流长身份校验才能算「我们这次下发生效了」。
+      const match = this.matchDeviceStream(state, { seekSeconds, speed });
+      if (match === 'foreign') {
+        songloft.log.warn(`[PlaylistManager] Push verify: device playing foreign media (deviceDuration=${state.duration}s), keeping failure`);
+        return -1;
+      }
+      // 还要求「刚起播」：'unknown' 时这是唯一判据，'ours' 时它挡掉容差放过的「上一首还在播」。
+      if (state.position > PUSH_VERIFY_START_WINDOW_SEC) {
+        songloft.log.warn(`[PlaylistManager] Push verify: device playing at position=${state.position}s beyond start window (match=${match}), keeping failure`);
+        return -1;
+      }
+      return Math.max(0, state.position);
+    }
+
+    return -1;
   }
 
   /**
@@ -1614,14 +1723,23 @@ export class PlaylistManager {
     }
 
     try {
-      const { status, position } = await this.minaService.getPlayState(this.accountId, this.deviceId);
+      const deviceState = await this.minaService.getPlayState(this.accountId, this.deviceId);
+      const { status, position } = deviceState;
       if (this.state !== 'stopped') return;
 
       if (status === 1) {
-        this.resumePollHits++;
-        if (this.resumePollHits >= EXTERNAL_RESUME_CONFIRM_COUNT) {
-          this.handleExternalResume(position);
-          return;
+        // status=1 不足以接管：小爱在放它自己的内容时同样是 1，误判会在一个曲长后强推下一首
+        // 把它打断（#408 那类「停了之后又自动播放」）。物理按键恢复的正常场景放的是我们的流，
+        // 'ours'/'unknown' 都放过，只挡明确认定被接管的 'foreign'。
+        if (this.matchDeviceStream(deviceState) === 'foreign') {
+          songloft.log.info(`[PlaylistManager] Resume poll: device playing foreign media (deviceDuration=${deviceState.duration}s), not taking over`);
+          this.resumePollHits = 0;
+        } else {
+          this.resumePollHits++;
+          if (this.resumePollHits >= EXTERNAL_RESUME_CONFIRM_COUNT) {
+            this.handleExternalResume(position);
+            return;
+          }
         }
       } else if (status >= 0) {
         this.resumePollHits = 0;
@@ -1726,6 +1844,10 @@ export class PlaylistManager {
     songloft.log.error('[PlaylistManager] Auto-next failed after retry, stopping');
     this.state = 'stopped';
     this.playStartTimeMs = 0;
+    // 张开外部恢复兜底网：下发失败可能仍是假失败（#98），而 playCurrent 的核实也有漏判的可能
+    // （设备既不上报流长、位置又超出起播窗口）。轮询发现设备其实在放我们的流就重新接管切歌，
+    // 否则这里就是播放的终点。stop() 一直有这一步，这条失败路径此前漏了。
+    this.startResumePoll();
   }
 
   /**
@@ -1891,6 +2013,9 @@ export class PlaylistManager {
       songloft.log.warn('[PlaylistManager] Resume after reload failed, staying stopped');
       this.state = 'stopped';
       this.playStartTimeMs = 0;
+      // 与 advanceToNext 的失败收尾同源：重推失败可能是 3012 假失败且核实漏判（#98），
+      // 留一张外部恢复兜底网，别让重载后的一次下发失败变成永久停摆。
+      this.startResumePoll();
     }
   }
 }
