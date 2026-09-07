@@ -465,9 +465,27 @@ function applyPlayerStatus(incoming: PlayerStatus): void {
 let statusSocket: WebSocket | null = null;
 let statusReconnect: ReturnType<typeof setTimeout> | null = null;
 let statusPoll: ReturnType<typeof setInterval> | null = null;
+let statusOpenTimer: ReturnType<typeof setTimeout> | null = null;
 let statusAttempts = 0;
 let statusManualClose = false;
 let statusRequestBusy = false;
+// 每次开连自增。一次断线可能同时打到 onerror 和 onclose，用它保证回收只做一遍，
+// 免得重连退避的 statusAttempts 被多加一次。
+let statusSocketGen = 0;
+
+// close 必须带关闭码。webf 0.24.27 的 websocket.dart:145 派发 close 事件时写的是
+// `client.closeCode!`，而本地 close 不带码时 dart:io 会把它留成 null
+// （websocket_impl.dart:1362 只赋传入的 code，1375 那个「5 秒等不到对端 close 帧」
+// 的兜底再把 null 抄给 closeCode），弱网断线于是抛 Null check operator used on a
+// null value。它抛在 _listen 的 onDone 里，后面派发 close 事件和清 map 的代码全部
+// 跳过 —— JS 侧 onclose 永不触发，既不重连也不回落轮询，状态流静默停更
+// （songloft-org/songloft-plugin-miot#96 第 4 条日志里那两次 PlatformError）。
+// 带上码之后 closeCode 的三条赋值路径就都非空了。
+const STATUS_CLOSE_CODE = 1000;
+const STATUS_CLOSE_REASON = 'client';
+// 开连后这么久还没 onopen 就先把轮询顶上，别让「连不上」等于「没状态」。
+// 真连上时 onopen 会把轮询清掉。
+const STATUS_OPEN_TIMEOUT_MS = 8000;
 
 function startStatusPolling() {
   if (statusPoll) return;
@@ -485,11 +503,42 @@ function scheduleStatusReconnect() {
   }, delay);
 }
 
+function clearStatusOpenTimer() {
+  if (statusOpenTimer) clearTimeout(statusOpenTimer);
+  statusOpenTimer = null;
+}
+
+/** 回收当前 socket。`recover` 为真时按退避重连，并先让轮询顶上。 */
+function abandonStatusSocket(gen: number, recover: boolean) {
+  if (gen !== statusSocketGen) return;
+  statusSocketGen += 1;
+  clearStatusOpenTimer();
+  const socket = statusSocket;
+  statusSocket = null;
+  state.statusConnected = false;
+  // 读实例上的常量，不读 `WebSocket.CLOSED`：WebF 的 WebSocket 是 JS polyfill
+  // （webf `bridge/polyfill/src/websocket.ts`），四个 readyState 常量只在构造函数里
+  // 挂到实例上，类上**没有**静态同名成员，`WebSocket.CLOSED` 在 WebF 里是 undefined。
+  if (socket && socket.readyState !== socket.CLOSED) {
+    try {
+      socket.close(STATUS_CLOSE_CODE, STATUS_CLOSE_REASON);
+    } catch {
+      // 已经关掉、或根本没连上，都不影响下面的回落。
+    }
+  }
+  if (recover && !statusManualClose) {
+    startStatusPolling();
+    scheduleStatusReconnect();
+  }
+}
+
 function openStatusSocket() {
   if (!state.currentAccountId || !state.currentDeviceId || typeof WebSocket === 'undefined') {
     startStatusPolling();
     return;
   }
+  if (statusSocket) abandonStatusSocket(statusSocketGen, false);
+  const gen = statusSocketGen;
   try {
     statusSocket = new WebSocket(
       pluginWebSocketUrl(
@@ -500,12 +549,15 @@ function openStatusSocket() {
       ),
     );
     statusSocket.onopen = () => {
+      if (gen !== statusSocketGen) return;
+      clearStatusOpenTimer();
       state.statusConnected = true;
       statusAttempts = 0;
       if (statusPoll) clearInterval(statusPoll);
       statusPoll = null;
     };
     statusSocket.onmessage = (event) => {
+      if (gen !== statusSocketGen) return;
       try {
         const frame = JSON.parse(String(event.data));
         if (frame?.type === 'status' && frame.data) applyPlayerStatus(frame.data);
@@ -513,18 +565,20 @@ function openStatusSocket() {
         // Ignore malformed frames; the next valid status replaces them.
       }
     };
-    statusSocket.onerror = () => statusSocket?.close();
-    statusSocket.onclose = () => {
-      statusSocket = null;
-      state.statusConnected = false;
-      if (!statusManualClose) {
-        startStatusPolling();
-        scheduleStatusReconnect();
-      }
-    };
+    // 恢复动作必须在 onerror 里自己做完，不能像旧写法那样 `close()` 一下等 onclose 收尾：
+    // WebF 的连接失败只发 error、不发 close（真实浏览器两者都发，close 才是恢复入口），
+    // 而那一下 close() 落到 webf 的「has not connect」分支，不产生任何事件 ——
+    // 于是 onclose 永不触发，既不重连也不回落轮询，状态永久停在最后一帧。
+    statusSocket.onerror = () => abandonStatusSocket(gen, true);
+    statusSocket.onclose = () => abandonStatusSocket(gen, true);
+    clearStatusOpenTimer();
+    statusOpenTimer = setTimeout(() => {
+      statusOpenTimer = null;
+      if (gen !== statusSocketGen || state.statusConnected) return;
+      startStatusPolling();
+    }, STATUS_OPEN_TIMEOUT_MS);
   } catch {
-    startStatusPolling();
-    scheduleStatusReconnect();
+    abandonStatusSocket(gen, true);
   }
 }
 
@@ -536,7 +590,9 @@ export function connectStatusStream(): void {
 }
 
 export function requestStatusRefresh(): void {
-  if (statusSocket?.readyState === WebSocket.OPEN) {
+  // 同上：`WebSocket.OPEN` 在 WebF 里是 undefined，旧写法拿它比对 readyState 恒为 false
+  // —— 这条「让服务端立刻推一帧状态」的请求在客户端里从来没发出去过。
+  if (statusSocket && statusSocket.readyState === statusSocket.OPEN) {
     statusSocket.send(JSON.stringify({ type: 'refresh' }));
   }
 }
@@ -547,9 +603,7 @@ export function disconnectStatusStream(): void {
   if (statusPoll) clearInterval(statusPoll);
   statusReconnect = null;
   statusPoll = null;
-  statusSocket?.close();
-  statusSocket = null;
-  state.statusConnected = false;
+  abandonStatusSocket(statusSocketGen, false);
 }
 
 export async function loadGroups(): Promise<void> {

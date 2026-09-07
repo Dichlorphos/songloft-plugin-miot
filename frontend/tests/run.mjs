@@ -56,6 +56,19 @@ assert.match(api, /apiGet\(path\)/);
 assert.match(api, /postEnvelope/);
 assert.match(store, /status\/ws/);
 assert.match(store, /startStatusPolling/);
+// 状态 WebSocket 的断线回收（songloft-org/songloft-plugin-miot#96 第 4 条）：
+// close 必须带关闭码，否则 webf 0.24.27 的 websocket.dart:145 `client.closeCode!`
+// 在弱网断线时抛错，JS 侧 onclose 永不触发、状态流静默停更；
+// onerror 必须自己走完恢复，WebF 的连接失败只发 error 不发 close。
+assert.match(store, /const STATUS_CLOSE_CODE = 1000/);
+assert.match(store, /socket\.close\(STATUS_CLOSE_CODE, STATUS_CLOSE_REASON\)/);
+assert.doesNotMatch(store, /\.close\(\)/);
+assert.match(store, /statusSocket\.onerror = \(\) => abandonStatusSocket\(gen, true\)/);
+assert.match(store, /STATUS_OPEN_TIMEOUT_MS/);
+// readyState 常量只能读实例：WebF 的 WebSocket polyfill 在构造函数里把四个常量挂到
+// 实例上，类上没有静态同名成员，`WebSocket.OPEN` / `WebSocket.CLOSED` 恒为 undefined。
+assert.doesNotMatch(store, /=== WebSocket\.(OPEN|CLOSED)/);
+assert.match(store, /statusSocket\.readyState === statusSocket\.OPEN/);
 assert.match(store, /external_search_sources/);
 assert.match(store, /selectCurrentPlaylistOnEntry/);
 assert.match(store, /await selectCurrentPlaylistOnEntry\(\)/);
