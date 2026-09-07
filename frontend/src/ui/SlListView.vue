@@ -8,6 +8,11 @@ const emit = defineEmits<{ scroll: [Event] }>();
 /**
  * 滚动位置的读写与 `@scroll` 事件，供 MainPage 的虚拟列表定位窗口用。
  *
+ * ⚠️ 原生分支当前**停用**：`runtime.ts` 的 `useNativeList` 恒为 false
+ * （songloft-org/songloft#444：`ListView.builder` 不随 Vue 对 childNodes 的动态
+ * patch 重新渲染，虚拟窗口一滑动列表就整片空白，真机 A/B 实测钉死结论）。
+ * 模板分支与下方原生分支的实测笔记保留作存档，待 WebF 修复后按 #444 路径重测回切。
+ *
  * 原生分支也绑 `@scroll`：WebF 的 `handleScroll` 只在**挂了监听器**时才派发 DOM `scroll`
  * （`_dispatchScrollEvent`），不绑就永远收不到。
  *

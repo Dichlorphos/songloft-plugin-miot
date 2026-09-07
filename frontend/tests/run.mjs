@@ -197,6 +197,11 @@ assert.match(style, /\.song-row \{[^}]*height: var\(--miot-row-height\)/);
 assert.doesNotMatch(style, /\.song-row \{[^}]*min-height: var\(--miot-row-height\)/);
 // 原生列表也要绑 @scroll：WebF 只在挂了监听器时才派发 DOM scroll，不绑窗口就永不推进。
 assert.match(slListView, /<webf-list-view[\s\S]*?@scroll="emit\('scroll', \$event\)"/);
+// #444 回归测试：歌单列表绝不能走原生 webf-list-view 分支。ListView.builder 不随 Vue 对
+// childNodes 的动态 patch（滑动窗口行 + 高度变化的占位条）重新渲染，滚过初始窗口后列表区
+// 持续空白（Android 14 WebF 0.24.27 真机、2000 首歌单实测；div 分支同手势脚本 A/B 零空白）。
+assert.match(runtime, /export const useNativeList = false/);
+assert.doesNotMatch(runtime, /useNativeList = nativeMemberProbe/);
 // 事件不来的客户端上还要有轮询兜底，否则往下滚全是空白，比不虚拟化更糟。
 assert.match(mainPage, /windowPollTimer = setInterval/);
 assert.match(mainPage, /clearInterval\(windowPollTimer\)/);

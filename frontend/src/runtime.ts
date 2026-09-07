@@ -84,7 +84,23 @@ function nativeDisplayProbe(tagName: string, expected: string): boolean {
 }
 
 export const useNativeUI = nativeMemberProbe('flutter-cupertino-switch', 'checked');
-export const useNativeList = nativeMemberProbe('webf-list-view', 'finishLoad');
+/**
+ * 歌单列表是否用原生 `<webf-list-view>` 渲染。**恒为 false**（songloft-org/songloft#444）。
+ *
+ * 30e51e0 修好探测后该分支随 v2026.9.4 首次在生产启用，大歌单滚动随即出现
+ * 空白/失联：真机（Android 14 WebF 0.24.27，2000 首歌单）复现定位到——JS 侧
+ * 虚拟窗口完全正常（scrollTop 读数、窗口推进、DOM 内行内容都正确），但
+ * `ListView.builder` 不把 Vue 动态 patch 的 childNodes（滑动的窗口行 + 高度变化的
+ * 首尾占位条）重新渲染上屏：滚过初始窗口（约 30 行）后列表区持续空白，偶尔
+ * 短暂刷出当前窗口又失联。div 分支（overflow 滚动容器）scrollHeight 是子元素
+ * 真实高度之和，确定性的，没有"外推-钳制-失联"这一类问题；同一手势脚本 A/B
+ * 对比，div 分支慢滚 400 步 + 连发 fling 全程逐帧渲染正确、零空白。
+ *
+ * 重新启用的前提：WebF 修复动态 childNodes 的渲染同步后，按 #444 的复现路径
+ * （大歌单慢滚/快滚到底、日志核对窗口与屏幕一致）在真机重测通过，再恢复探测：
+ * `nativeMemberProbe('webf-list-view', 'finishLoad')`。
+ */
+export const useNativeList = false;
 export const useNativeSlider = nativeDisplayProbe('songloft-slider', 'inline-block');
 
 export type AppPage = 'main' | 'settings' | 'player';
