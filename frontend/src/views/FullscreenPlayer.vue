@@ -42,8 +42,8 @@ const activeLyric = computed(() => {
 //      会 `evict(BoxFitImageKey(url, ImageConfiguration.empty), includeLive: true)`
 //      紧接着又用同一个 key 去 resolve，同 URL 的两个 img 会互相把对方（连同已解码的
 //      `ui.Image`）毙掉，表现是空白且**不发 error 事件**（#86 的可疑主因之一）。
-const { src: cover, onError: onCoverError, onLoad: onCoverLoad } = useSongCover(() => state.player.current_song, 768);
-const { src: coverMobile, onError: onCoverMobileError, onLoad: onCoverMobileLoad } = useSongCover(() => state.player.current_song, 640);
+const { src: cover, epoch: coverEpoch, onError: onCoverError, onLoad: onCoverLoad } = useSongCover(() => state.player.current_song, 768);
+const { src: coverMobile, epoch: coverMobileEpoch, onError: onCoverMobileError, onLoad: onCoverMobileLoad } = useSongCover(() => state.player.current_song, 640);
 
 function parseLrc(text: string): LyricLine[] {
   const output: LyricLine[] = [];
@@ -258,7 +258,7 @@ watch(activeLyric, centerActiveLyric);
           <div class="fullscreen-desktop-stage">
             <section class="fullscreen-cover-column" aria-label="当前歌曲">
               <div class="fullscreen-cover-frame">
-                <img v-if="cover" class="fullscreen-cover" :src="cover" :alt="state.player.current_song?.title || '歌曲封面'" @error="onCoverError" @load="onCoverLoad" />
+                <img v-if="cover" :key="coverEpoch" class="fullscreen-cover" :src="cover" :alt="state.player.current_song?.title || '歌曲封面'" @error="onCoverError" @load="onCoverLoad" />
                 <div v-else class="fullscreen-cover player-cover-empty"><SlIcon name="music_note" :size="44" player-icon /></div>
               </div>
               <div class="fullscreen-song-meta fullscreen-song-meta-desktop">
@@ -284,7 +284,7 @@ watch(activeLyric, centerActiveLyric);
             >
               <section class="fullscreen-mobile-slide" aria-label="歌曲封面">
                 <div class="fullscreen-cover-frame">
-                  <img v-if="coverMobile" class="fullscreen-cover" :src="coverMobile" :alt="state.player.current_song?.title || '歌曲封面'" @error="onCoverMobileError" @load="onCoverMobileLoad" />
+                  <img v-if="coverMobile" :key="coverMobileEpoch" class="fullscreen-cover" :src="coverMobile" :alt="state.player.current_song?.title || '歌曲封面'" @error="onCoverMobileError" @load="onCoverMobileLoad" />
                   <div v-else class="fullscreen-cover player-cover-empty"><SlIcon name="music_note" :size="44" player-icon /></div>
                 </div>
               </section>

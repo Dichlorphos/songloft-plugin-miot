@@ -35,7 +35,7 @@ const isFavorite = ref(false);
 const favoriteBusy = ref(false);
 const sleepTimerBusy = ref(false);
 const sleepTimer = ref<SleepTimerStatus>({ active: false, mode: 'time', remaining: 0, total: 0 });
-const { src: cover, onError: onCoverError, onLoad: onCoverLoad } = useSongCover(() => state.player.current_song, 96);
+const { src: cover, epoch: coverEpoch, onError: onCoverError, onLoad: onCoverLoad } = useSongCover(() => state.player.current_song, 96);
 
 const formattedPosition = computed(() => formatTime(Number(state.player.position || 0)));
 const formattedDuration = computed(() => formatTime(Number(state.player.duration || 0)));
@@ -156,7 +156,7 @@ async function cancelSleepTimer(): Promise<void> {
       <!-- 左侧：歌曲信息 + 收藏按钮 -->
       <div class="player-bar-left">
         <div class="player-bar-info" role="button" tabindex="0" aria-label="展开播放器" @click="openPlayer" @keydown.enter="openPlayer">
-          <img v-if="cover" class="player-cover" :src="cover" :alt="state.player.current_song?.title || '歌曲封面'" @error="onCoverError" @load="onCoverLoad" />
+          <img v-if="cover" :key="coverEpoch" class="player-cover" :src="cover" :alt="state.player.current_song?.title || '歌曲封面'" @error="onCoverError" @load="onCoverLoad" />
           <div v-else class="player-cover player-cover-empty"><SlIcon name="music_note" :size="22" player-icon /></div>
           <div class="player-copy">
             <span class="player-title">{{ state.player.current_song?.title || '暂无播放' }}</span>

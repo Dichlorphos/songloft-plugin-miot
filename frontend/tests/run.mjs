@@ -261,7 +261,7 @@ assert.match(covers, /MAX_COVER_RETRIES = \d+/);
 assert.match(covers, /retries >= MAX_COVER_RETRIES/);
 // 加载成功要把重试预算还回去：插件 Tab 靠 Offstage 保活，同一个组件实例可能活几小时，
 // 预算必须是「每段连续失败」而不是「每首歌」，否则偶发失败两次就再也不重试了。
-assert.match(covers, /function onLoad\(\): void \{\s*retries = 0;/);
+assert.match(covers, /function onLoad\(\): void \{[\s\S]{0,120}?retries = 0;/);
 assert.match(playerBar, /@load="onCoverLoad"/);
 assert.match(fullscreenPlayer, /@load="onCoverLoad"/);
 assert.match(fullscreenPlayer, /@load="onCoverMobileLoad"/);
@@ -273,6 +273,32 @@ assert.match(covers, /removeEventListener\('visibilitychange'/);
 // 全屏页桌面/移动两个 stage 同时在 DOM 里，必须用不同的 w=：同 URL 的两个 <img> 会
 // 因 WebF 的 evict(..., includeLive: true) 互相把对方已解码的图毙掉。
 assert.match(fullscreenPlayer, /useSongCover\(\(\) => state\.player\.current_song, 640\)/);
+
+// #96 第 3 次复发的回归测试：换 URL 还不够，必须换掉 <img> 元素本身。
+// 判据是用户实测的「封面丢失后**切歌也不出图**」—— 换歌本来就会走 WebF 完整的
+// set src → _cachedImageInfo = null → 重新加载，连它都救不回来，说明坏的不是 URL /
+// 缓存键，而是 ImageState 断链：_handleImageFrame 拿到帧后只能靠 state!.requestStateUpdate()
+// 重绘，_imageState 里没有 mounted 的 state 时两个分支都不成立、连 _hasPendingImageUpdate
+// 兜底都不置位 → 照常解码、照常发 load，但永远不重绘（空白且不发 error）。
+// 只有让 Vue 卸掉旧 <img> 重建，才能重走「首次打开全屏播放器」那条已知可用的挂载路径。
+assert.match(covers, /epoch: Ref<number>/);
+assert.match(covers, /epoch\.value \+= 1/);
+assert.match(playerBar, /<img [^>]*:key="coverEpoch"/);
+assert.match(fullscreenPlayer, /<img [^>]*:key="coverEpoch"/);
+assert.match(fullscreenPlayer, /<img [^>]*:key="coverMobileEpoch"/);
+// epoch 必须单调递增：换歌时 nonce 归 0 是对的（URL 本来就变了），但 key 一旦回退，
+// Vue 就有机会复用到那个绘制链路已经断掉的旧元素。
+assert.doesNotMatch(covers, /epoch\.value = 0/);
+// load / error 一个都不来时的看门狗：WebF 的 _updateImageData 任务链（Debounce →
+// addPostFrameCallback → registerCallbackOnceForFlutterAttached）卡死时页面侧没有任何
+// 可观测事件，onError 的重试路径永远不会被触发，必须自己补一次。
+assert.match(covers, /COVER_VISIBILITY_WATCHDOG_MS/);
+assert.match(covers, /armWatchdog\(\);/);
+// 每个可见期只补一次，别把「这张图真的是 404」变成无限重建。
+assert.match(covers, /if \(watchdogUsed\) return;/);
+// load / error 到了就要撤掉看门狗，否则它会在 1.5s 后无谓地把已经好了的图重建一次。
+assert.match(covers, /function onLoad\(\): void \{\s*clearWatchdog\(\);/);
+assert.match(covers, /function onError\(\): void \{\s*clearWatchdog\(\);/);
 assert.match(fullscreenPlayer, /@error="onCoverMobileError"/);
 
 // #86 回归测试（第 2 条「miot 收藏后曲库红心不同步」）。
