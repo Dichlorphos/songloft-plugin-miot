@@ -215,6 +215,12 @@ assert.match(slListView, /<webf-list-view[\s\S]*?@scroll="emit\('scroll', \$even
 // 持续空白（Android 14 WebF 0.24.27 真机、2000 首歌单实测；div 分支同手势脚本 A/B 零空白）。
 assert.match(runtime, /export const useNativeList = false/);
 assert.doesNotMatch(runtime, /useNativeList = nativeMemberProbe/);
+// #448 回归测试：窗口盖不住可视区时必须无条件跟上，不能被 WINDOW_STEP_ROWS 滞后阈值挡住。
+// desired 被 max(0, …) 削去上缓冲，顶部前 12 行里窗口起点就等于首个可见行；快滑下去再快滑回顶时，
+// 回滑途中的采样会把 rawWindowStart 停在 1..3，回到 scrollTop=0 那次漂移只有 1..3 行被跳过，
+// 于是顶部前几首歌永久不渲染（只剩占位条撑出的 64..192px 空白，120ms 轮询也不自愈）。
+assert.match(mainPage, /const uncovered = windowStart\.value > firstVisible \|\| windowEnd\.value < lastVisible/);
+assert.match(mainPage, /if \(uncovered \|\| Math\.abs\(desired - rawWindowStart\.value\) >= WINDOW_STEP_ROWS\)/);
 // 事件不来的客户端上还要有轮询兜底，否则往下滚全是空白，比不虚拟化更糟。
 assert.match(mainPage, /windowPollTimer = setInterval/);
 assert.match(mainPage, /clearInterval\(windowPollTimer\)/);

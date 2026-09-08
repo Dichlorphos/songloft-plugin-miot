@@ -101,10 +101,30 @@ function calibrateRowHeight(): void {
   if (parsed > 0) rowHeight.value = parsed;
 }
 
-/** 按当前滚动位置推进窗口。漂移不足 WINDOW_STEP_ROWS 行时不动，避免滚动中反复重渲染。 */
+/**
+ * 按当前滚动位置推进窗口。漂移不足 WINDOW_STEP_ROWS 行时不动，避免滚动中反复重渲染；
+ * 但窗口一旦盖不住可视区，就无条件跟上，不受漂移阈值约束。
+ *
+ * 为什么需要这条「盖不住就强制跟上」（songloft-org/songloft#448）：`desired` 被
+ * `Math.max(0, …)` 削去了上缓冲，所以在顶部前 WINDOW_BUFFER_ROWS 行里窗口起点就等于
+ * 首个可见行，任何滞后都不再被缓冲吸收。快速下滑再快速回滑时，回滑途中的某次采样可能
+ * 落在 `floor(top / 行高) = 13..15`（把 rawWindowStart 定成 1..3），随后停在顶部那次采样
+ * `desired = 0`、漂移只有 1..3 行 < 阈值，旧逻辑直接跳过：windowStart 永久停在 1..3，
+ * 顶部前几首歌不渲染、只剩占位条撑出的 64..192px 空白，而且 120ms 轮询也永远救不回来
+ * （漂移恒 < 阈值），只有再往下滚 17 行以上才解开。底部边界不受影响——那里 desired 超过
+ * maxStart 会被 windowStart 的 clamp 修成精确值。
+ *
+ * 判据刻意用 clamp 后的 windowStart / windowEnd（即真正渲染出来的区间），也就是直接问
+ * 「屏上有没有洞」，不为顶部/底部各写一条边界特例。正常滚动时缓冲 12 行 > 阈值 4 行，
+ * uncovered 恒为 false，行为与旧实现一致；重复赋同值的 ref 不触发 patch，所以轮询每
+ * 120ms 多判一次也没有额外重渲染开销。
+ */
 function syncWindowToScroll(top: number): void {
-  const desired = Math.max(0, Math.floor(top / rowHeight.value) - WINDOW_BUFFER_ROWS);
-  if (Math.abs(desired - rawWindowStart.value) >= WINDOW_STEP_ROWS) rawWindowStart.value = desired;
+  const firstVisible = Math.max(0, Math.floor(top / rowHeight.value));
+  const lastVisible = Math.min(totalSongs.value, Math.ceil((top + listHeight.value) / rowHeight.value));
+  const desired = Math.max(0, firstVisible - WINDOW_BUFFER_ROWS);
+  const uncovered = windowStart.value > firstVisible || windowEnd.value < lastVisible;
+  if (uncovered || Math.abs(desired - rawWindowStart.value) >= WINDOW_STEP_ROWS) rawWindowStart.value = desired;
 }
 
 function onListScroll(event: Event): void {
