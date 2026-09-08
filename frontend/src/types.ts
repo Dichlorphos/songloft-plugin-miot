@@ -141,6 +141,15 @@ export interface Song {
   is_live?: boolean;
 }
 
+/** 某台设备在某个歌单上次播到哪一首（后端 GET /playlists/:id/progress） */
+export interface PlaylistProgress {
+  playlist_id: number;
+  song_id: number;
+  song_index: number;
+  position_sec: number;
+  updated_at: number;
+}
+
 export type PlayMode = 'order' | 'single' | 'random' | 'loop' | 'singlePlay';
 
 export interface PlayerStatus {

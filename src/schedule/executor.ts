@@ -7,7 +7,7 @@
 import { ConfigManager } from '../config/manager';
 import { AccountManager } from '../account/manager';
 import { MinaService } from '../service/service';
-import { PlaylistManagerMap } from '../player/manager';
+import { PlaylistManagerMap, resolvePlaylistResumeStart } from '../player/manager';
 import { IndexingManager } from '../indexing/manager';
 import type { IndexedPlaylist } from '../indexing/manager';
 import { ConversationMonitor } from '../conversation/monitor';
@@ -347,24 +347,32 @@ export class TaskExecutor {
       switch (params.start_position) {
         case 'random':
           return { startIndex: 0, randomStart: true };
-        case 'resume':
-          // 仅当设备上次播的就是这个歌单，续播索引才有意义
-          if (devCfg && devCfg.playlist_id === pid && devCfg.current_song_index > 0) {
-            songloft.log.info(`[TaskExecutor] 从上次进度继续 playlistId=${pid} index=${devCfg.current_song_index}`);
-            return { startIndex: devCfg.current_song_index, randomStart: false };
+        case 'resume': {
+          // 查「每设备 × 每歌单」的进度表：中途切去别的歌单也不影响这个歌单自己的进度。
+          // 拿到 songId 就交给 playPlaylistFromSong 按 ID 定位，歌单增删歌后不会串歌。
+          const resume = await resolvePlaylistResumeStart(this.configManager, pm.getPrimary(), pid);
+          if (resume) {
+            songloft.log.info(`[TaskExecutor] 从上次进度继续 playlistId=${pid} songId=${resume.songId} index=${resume.songIndex}`);
+            return {
+              startIndex: resume.songIndex,
+              randomStart: false,
+              songId: resume.songId > 0 ? resume.songId : undefined,
+            };
           }
-          songloft.log.info(`[TaskExecutor] 无可续播进度（歌单不匹配或首次），从第一首开始 playlistId=${pid}`);
+          songloft.log.info(`[TaskExecutor] 无可续播进度（首次播放该歌单），从第一首开始 playlistId=${pid}`);
           return { startIndex: 0, randomStart: false };
+        }
         default:
           return { startIndex: 0, randomStart: false };
       }
     };
 
     // 描述起始位置（用于返回给日志/前端的友好文案）
-    const describeStart = (start: { startIndex: number; randomStart: boolean }): string => {
+    const describeStart = (start: { startIndex: number; randomStart: boolean; songId?: number }): string => {
       if (withSong && (params.song_name || params.song_id)) return `（从「${params.song_name || '#' + params.song_id}」开始）`;
       if (start.randomStart) return '（随机起始）';
-      if (params.start_position === 'resume' && start.startIndex > 0) return '（从上次进度继续）';
+      // songId 也要看：上次正好停在第一首时 startIndex 为 0，但确实是续播
+      if (params.start_position === 'resume' && (start.startIndex > 0 || (start.songId ?? 0) > 0)) return '（从上次进度继续）';
       return '';
     };
 

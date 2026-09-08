@@ -16,6 +16,8 @@ import type {
   ScheduledTask,
   TaskLog,
   AIConfig,
+  PlaylistProgress,
+  PlaylistProgressStore,
 } from '../types';
 import { DEFAULT_MEMORY_MAX_RECORDS, normalizeMemoryMaxRecords } from '../memory/types';
 import { getDefaultVoiceCommands } from '../voicecmd/defaults';
@@ -30,12 +32,31 @@ const STORAGE_KEY_SCHEDULE_LOGS = 'schedule_logs';
 const STORAGE_KEY_AI_CONFIG = 'ai_config';
 const STORAGE_KEY_SEARCH_PROVIDERS = 'search_provider_registry';
 const STORAGE_KEY_DEVICE_GROUPS = 'device_groups';
+const STORAGE_KEY_PLAYLIST_PROGRESS = 'playlist_progress';
 
 /** 搜索源候选注册默认搜索子路径 */
 const DEFAULT_SEARCH_PATH = '/api/search/topone';
 
 /** 日志最大条数（环形缓冲） */
 const MAX_SCHEDULE_LOGS = 200;
+
+/**
+ * 每台设备最多记多少个歌单的播放进度。
+ * 进度是每次切歌都要写的热数据，整表以一个 JSON 落在 storage 里，必须有界：
+ * 超出后按 updated_at 淘汰最久没播的歌单（用户几乎不会在 30 个歌单之间来回切）。
+ */
+const MAX_PLAYLIST_PROGRESS_PER_DEVICE = 30;
+
+/**
+ * 歌单进度的作用域键。
+ *
+ * 一律记在「PlaylistManager 的主设备」名下（分组共享主设备的那一份），与
+ * `PlaylistManager.persistState` 写 DeviceConfig 的口径完全一致。调用方拿到的是
+ * 用户点的那台设备，分组时它可能不是主设备，所以要用 `pm.getPrimary()` 的结果来构造。
+ */
+export function playlistProgressScope(accountId: string, deviceId: string): string {
+  return accountId + ':' + deviceId;
+}
 
 /** 默认插件配置 */
 function defaultPluginConfig(): PluginConfig {
@@ -111,6 +132,9 @@ export class ConfigManager {
   //   getConfig 每次返回浅合并的新对象，不暴露缓存引用。
   private accountsCache: Promise<AccountConfig[]> | null = null;
   private configCache: Promise<Partial<PluginConfig>> | null = null;
+  // 歌单进度表：每次切歌都要读改写，不缓存就是每首歌一次多余的 storage.get。
+  // 与上面两个 key 同一套约定（缓存 in-flight Promise + 写穿透）。
+  private playlistProgressCache: Promise<PlaylistProgressStore> | null = null;
 
   // ===== 通用存储读写 =====
 
@@ -235,6 +259,8 @@ export class ConfigManager {
       throw new Error(`Account not found: ${accountId}`);
     }
     await this.saveAccounts(filtered);
+    // 账号下所有设备的歌单进度一起清掉，否则账号删了进度还在表里占位到永远
+    await this.removePlaylistProgressByAccount(accountId);
   }
 
   // ===== 设备管理（存储层） =====
@@ -264,6 +290,85 @@ export class ConfigManager {
   /** 设置账号最后选中的设备 */
   async setLastSelectedDevice(accountId: string, deviceId: string): Promise<void> {
     await this.updateAccount(accountId, { last_selected_device_id: deviceId });
+  }
+
+  // ===== 歌单播放进度（每设备 × 每歌单） =====
+
+  /**
+   * 读取整张进度表。返回缓存引用（与 getAccounts 同约定）：调用方原地改完必须走
+   * savePlaylistProgressStore 写回。存储内容被写坏（不是对象）时退回空表，不污染调用方。
+   */
+  private async getPlaylistProgressStore(): Promise<PlaylistProgressStore> {
+    if (this.playlistProgressCache === null) {
+      this.playlistProgressCache = this.load<PlaylistProgressStore>(STORAGE_KEY_PLAYLIST_PROGRESS, {});
+    }
+    const store = await this.playlistProgressCache;
+    if (!store || typeof store !== 'object' || Array.isArray(store)) {
+      const empty: PlaylistProgressStore = {};
+      this.playlistProgressCache = Promise.resolve(empty);
+      return empty;
+    }
+    return store;
+  }
+
+  private async savePlaylistProgressStore(store: PlaylistProgressStore): Promise<void> {
+    await this.save(STORAGE_KEY_PLAYLIST_PROGRESS, store);
+    this.playlistProgressCache = Promise.resolve(store);
+  }
+
+  /** 读取某设备在某歌单的播放进度；无有效记录返回 null */
+  async getPlaylistProgress(scopeKey: string, playlistId: number): Promise<PlaylistProgress | null> {
+    if (!scopeKey || !playlistId || playlistId <= 0) return null;
+    const store = await this.getPlaylistProgressStore();
+    const list = store[scopeKey];
+    if (!Array.isArray(list)) return null;
+    const hit = list.find(p => p && p.playlist_id === playlistId && p.song_id > 0);
+    return hit ?? null;
+  }
+
+  /** 写入某设备在某歌单的播放进度（同歌单覆盖，超出上限淘汰最久没播的） */
+  async savePlaylistProgress(scopeKey: string, progress: PlaylistProgress): Promise<void> {
+    if (!scopeKey || !progress || progress.playlist_id <= 0 || progress.song_id <= 0) return;
+    const store = await this.getPlaylistProgressStore();
+    const kept = (Array.isArray(store[scopeKey]) ? store[scopeKey] : [])
+      .filter(p => p && p.playlist_id > 0 && p.song_id > 0 && p.playlist_id !== progress.playlist_id);
+    kept.push(progress);
+    kept.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+    store[scopeKey] = kept.slice(0, MAX_PLAYLIST_PROGRESS_PER_DEVICE);
+    await this.savePlaylistProgressStore(store);
+  }
+
+  /** 删除某设备在某歌单的播放进度（歌单 ID 已失效时清理）；无记录则静默 */
+  async removePlaylistProgress(scopeKey: string, playlistId: number): Promise<void> {
+    if (!scopeKey || !playlistId || playlistId <= 0) return;
+    const store = await this.getPlaylistProgressStore();
+    const list = store[scopeKey];
+    if (!Array.isArray(list)) return;
+    const filtered = list.filter(p => !p || p.playlist_id !== playlistId);
+    if (filtered.length === list.length) return;
+    if (filtered.length === 0) {
+      delete store[scopeKey];
+    } else {
+      store[scopeKey] = filtered;
+    }
+    await this.savePlaylistProgressStore(store);
+  }
+
+  /** 删除某账号下所有设备的歌单进度（账号被移除时调用） */
+  async removePlaylistProgressByAccount(accountId: string): Promise<void> {
+    if (!accountId) return;
+    const store = await this.getPlaylistProgressStore();
+    const prefix = accountId + ':';
+    let changed = false;
+    for (const key of Object.keys(store)) {
+      if (key.startsWith(prefix)) {
+        delete store[key];
+        changed = true;
+      }
+    }
+    if (changed) {
+      await this.savePlaylistProgressStore(store);
+    }
   }
 
   // ===== Webhook管理 =====

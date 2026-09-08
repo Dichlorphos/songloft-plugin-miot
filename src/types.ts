@@ -52,6 +52,27 @@ export interface DeviceConfig {
   resume_seek_offset_sec?: number; // 当时那条流从歌曲第几秒开始；设备上报的流内偏移要加它才是曲内位置
 }
 
+// ===== 歌单播放进度（每设备 × 每歌单）=====
+
+/**
+ * 某台设备在某个歌单里最后播到哪一首。
+ *
+ * 上面 DeviceConfig 的 `playlist_id` / `current_song_index` 只有**一个槽位**，表达的是
+ * 「这台设备最后活跃的是哪个歌单」，是热重载续播（`resumeAfterReload`）的依据；切一次歌单
+ * 上一个歌单的进度就被覆盖，于是切回去只能从头播。本结构按歌单分别记，来回切歌单时
+ * 每个歌单都能回到自己上次的位置。两者语义不同，不要相互替代。
+ */
+export interface PlaylistProgress {
+  playlist_id: number;
+  song_id: number;       // 主键：按 ID 定位，歌单排序变化/增删歌之后仍准（同 #59 / #420 的教训）
+  song_index: number;    // 兜底提示：song_id 已不在歌单里时退回这个下标
+  position_sec: number;  // 该歌曲内的位置（秒）。当前只记录不消费，续播一律从这首歌开头开始
+  updated_at: number;    // Date.now()，超出每设备条数上限时按它淘汰最久没播的歌单
+}
+
+/** 歌单进度表：scopeKey（'<accountId>:<deviceId>'）-> 该设备各歌单的进度 */
+export type PlaylistProgressStore = Record<string, PlaylistProgress[]>;
+
 // ===== Token信息 =====
 
 /** 平台Token完整信息 */

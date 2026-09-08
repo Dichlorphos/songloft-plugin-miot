@@ -4,7 +4,7 @@
 
 /// <reference types="@songloft/plugin-sdk" />
 
-import { ConfigManager } from '../config/manager';
+import { ConfigManager, playlistProgressScope } from '../config/manager';
 import { MinaService } from '../service/service';
 import { URLBuilder, playbackOptionsOf, playbackOptionsFromConfig } from './url_builder';
 import { getHostBaseUrl, callHostAPI } from '../utils/http';
@@ -94,6 +94,46 @@ const LOOP_DETECT_RESET_THRESHOLD_SEC = 3;
 /** 判断 playlistId 是否为临时歌单 */
 export function isTempPlaylistId(id: number): boolean {
   return id < 0;
+}
+
+/**
+ * 解析「这台设备上次在该歌单播到哪」，供语音「播放歌单X」、定时任务
+ * `start_position=resume`、网页「继续播放」三条路共用同一份口径。
+ *
+ * 先查每歌单进度表；表里没有时做一次惰性兜底：老版本只有 DeviceConfig 那**一个**歌单槽位，
+ * 若它记的正好是同一个歌单，就拿它合成一份（只读不写盘，用户升级后第一次仍能续上，
+ * 不需要迁移脚本）。返回 null 表示没有可续播的进度，调用方从歌单头部开始。
+ *
+ * `primary` 必须传 `PlaylistManager.getPrimary()`：分组设备的进度记在主设备名下，
+ * 用户点的那台不一定是主设备。
+ */
+export async function resolvePlaylistResumeStart(
+  configManager: ConfigManager,
+  primary: DeviceTargetRef,
+  playlistId: number,
+): Promise<{ songId: number; songIndex: number } | null> {
+  if (!playlistId || playlistId <= 0) return null;
+  try {
+    const progress = await configManager.getPlaylistProgress(
+      playlistProgressScope(primary.account_id, primary.device_id),
+      playlistId,
+    );
+    if (progress) {
+      return { songId: progress.song_id, songIndex: Math.max(0, progress.song_index || 0) };
+    }
+    const devices = await configManager.getDevices(primary.account_id);
+    const devCfg = devices.find(d => d.device_id === primary.device_id);
+    if (devCfg && devCfg.playlist_id === playlistId) {
+      const songId = devCfg.resume_song_id || 0;
+      const songIndex = Math.max(0, devCfg.current_song_index || 0);
+      if (songId > 0 || songIndex > 0) {
+        return { songId, songIndex };
+      }
+    }
+  } catch (e) {
+    songloft.log.warn('[PlaylistManager] resolvePlaylistResumeStart failed: ' + String(e));
+  }
+  return null;
 }
 
 /** 统一播放模式，并兼容旧版 Web 前端曾写入的别名。 */
@@ -1073,6 +1113,11 @@ export class PlaylistManager {
       if (!pl) {
         this._lastLoadNotFound = true;
         songloft.log.warn(`[PlaylistManager] playlist ${playlistId} not found (stale ID), signaling caller to refresh index`);
+        // 歌单真的不在了：顺手删掉它的进度记录，否则表里会攒下一堆永远命中不到的孤儿条目
+        // （扫描 auto-create 会让歌单换 ID），把有用的进度挤出上限。
+        await this.configManager
+          .removePlaylistProgress(playlistProgressScope(this.accountId, this.deviceId), playlistId)
+          .catch(e => songloft.log.warn('[PlaylistManager] Failed to drop stale playlist progress: ' + String(e)));
       }
     } catch (e) {
       songloft.log.warn(`[PlaylistManager] getById check failed playlistId=${playlistId}: ${String(e)}`);
@@ -1918,6 +1963,43 @@ export class PlaylistManager {
     } catch (e) {
       songloft.log.warn('[PlaylistManager] Failed to persist state: ' + String(e));
     }
+    await this.persistPlaylistProgress();
+  }
+
+  /**
+   * 记录「本歌单最后播到哪一首」。
+   *
+   * 上面写的 DeviceConfig 只有一个歌单槽位，切歌单就被覆盖；这里按歌单单独存一份，
+   * 于是切走再切回来时每个歌单都能回到自己上次的位置（语音「播放歌单X」、定时任务
+   * `start_position=resume`、网页「继续播放」三条路都读它）。
+   *
+   * 挂在 persistState 里而不是各调用点：persistState 是 play / pause / stop / next /
+   * previous / 自动切歌的唯一收口，跟着它走就不会有哪条路漏记。
+   * 停止态也照记（要的就是「停在哪首」），只是曲内位置归零。
+   */
+  private async persistPlaylistProgress(): Promise<void> {
+    const song = this.getCurrentSong();
+    if (!song || song.id <= 0 || this.playlistId <= 0) return;
+    let positionSec = 0;
+    if (this.state === 'playing') {
+      positionSec = Math.max(0, Math.floor(this.getPosition()));
+    } else if (this.state === 'paused') {
+      positionSec = Math.max(0, Math.floor(this.pausedPositionSec));
+    }
+    try {
+      await this.configManager.savePlaylistProgress(
+        playlistProgressScope(this.accountId, this.deviceId),
+        {
+          playlist_id: this.playlistId,
+          song_id: song.id,
+          song_index: this.currentIndex,
+          position_sec: positionSec,
+          updated_at: Date.now(),
+        },
+      );
+    } catch (e) {
+      songloft.log.warn('[PlaylistManager] Failed to persist playlist progress: ' + String(e));
+    }
   }
 
   /**
@@ -2166,6 +2248,14 @@ export class PlaylistManagerMap {
     }
 
     return manager;
+  }
+
+  /**
+   * 解析某设备的「主设备」（分组设备返回组内首位，独立设备返回自身）。
+   * 同步、无副作用，不会像 getOrCreate 那样建 manager；供只读查询（如歌单进度）定位作用域。
+   */
+  resolvePrimary(accountId: string, deviceId: string): DeviceTargetRef {
+    return this.resolveTargetSync(accountId, deviceId).primary;
   }
 
   /**

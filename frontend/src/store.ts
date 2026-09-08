@@ -12,6 +12,7 @@ import type {
   MiotConfig,
   PlayerStatus,
   Playlist,
+  PlaylistProgress,
   PlayMode,
   ScheduleLog,
   ScheduledTask,
@@ -96,6 +97,9 @@ export const state = reactive({
   songsLoading: false,
   songsError: '',
   songSearch: '',
+  // 当前设备在当前所选歌单上次播到哪一首。切歌单/切设备都要重取：进度是按
+  // 「设备 × 歌单」记的，换任一维度都是另一条记录。
+  playlistProgress: null as PlaylistProgress | null,
   player: {} as PlayerStatus,
   playerBusy: false,
   statusConnected: false,
@@ -292,6 +296,9 @@ export async function selectDevice(accountId: string, selectedDeviceId: string):
   state.currentAccountId = accountId;
   state.currentDeviceId = selectedDeviceId;
   state.player = {};
+  // 进度是按设备记的：换了设备，当前歌单的续播位置也换了一条记录
+  state.playlistProgress = null;
+  void refreshPlaylistProgress();
   connectStatusStream();
   try {
     await post('/mina/last_selection', { account_id: accountId, device_id: selectedDeviceId });
@@ -330,10 +337,14 @@ export async function selectPlaylist(playlistId: string): Promise<void> {
   state.songSearch = '';
   state.songs = [];
   state.songsError = '';
+  state.playlistProgress = null;
   if (!playlistId) return;
   songRequest += 1;
   const request = songRequest;
   state.songsLoading = true;
+  // 不等它：进度只是辅助信息（标记上次播放的那首、亮起「继续播放」），
+  // 不该把歌曲列表的加载卡在它后面
+  void refreshPlaylistProgress();
   try {
     const songs = await get<Song[]>(`/playlists/${encodeURIComponent(playlistId)}/songs`);
     if (request === songRequest) state.songs = songs || [];
@@ -343,6 +354,39 @@ export async function selectPlaylist(playlistId: string): Promise<void> {
     if (request === songRequest) state.songsLoading = false;
   }
 }
+
+let progressRequest = 0;
+/**
+ * 拉取当前设备在当前所选歌单的续播进度。进度按「设备 × 歌单」记，
+ * 所以切歌单、切设备都要重取；取不到就当没有，不打扰用户。
+ */
+export async function refreshPlaylistProgress(): Promise<void> {
+  progressRequest += 1;
+  const request = progressRequest;
+  const playlistId = state.selectedPlaylistId;
+  if (!playlistId || !state.currentAccountId || !state.currentDeviceId) {
+    state.playlistProgress = null;
+    return;
+  }
+  try {
+    const progress = await get<PlaylistProgress | null>(
+      `/playlists/${encodeURIComponent(playlistId)}/progress${query({
+        account_id: state.currentAccountId,
+        device_id: state.currentDeviceId,
+      })}`,
+    );
+    if (request === progressRequest) state.playlistProgress = progress || null;
+  } catch {
+    if (request === progressRequest) state.playlistProgress = null;
+  }
+}
+
+/** 当前所选歌单里「上次播到的那首」，用于列表标记与「继续播放」按钮文案 */
+export const lastPlayedSong = computed(() => {
+  const songId = state.playlistProgress?.song_id;
+  if (!songId) return null;
+  return state.songs.find((song) => song.id === songId) || null;
+});
 
 async function selectCurrentPlaylistOnEntry(): Promise<void> {
   if (state.selectedPlaylistId) return;
@@ -386,6 +430,23 @@ export async function playSong(song: Song, visibleIndex?: number): Promise<void>
     start_index: fallbackIndex >= 0 ? fallbackIndex : visibleIndex || 0,
     play_mode: state.player.play_mode || 'order',
   });
+  void refreshPlaylistProgress();
+}
+
+/**
+ * 从本歌单上次播到的那首继续播放。
+ * 起点由后端按「设备 × 歌单」的进度表算（按歌曲 ID 定位，歌单顺序变了也不会串歌），
+ * 前端不传 song_id / start_index，避免两边各算一次口径不一致。
+ */
+export async function resumePlaylist(): Promise<void> {
+  if (!state.selectedPlaylistId) throw new Error('请先选择歌单');
+  await playerCommand('/player/play', {
+    ...targetBody(),
+    playlist_id: Number(state.selectedPlaylistId),
+    start_position: 'resume',
+    play_mode: state.player.play_mode || 'order',
+  });
+  void refreshPlaylistProgress();
 }
 
 export async function playerCommand(path: string, body: Record<string, unknown> = {}): Promise<void> {

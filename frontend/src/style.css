@@ -206,6 +206,8 @@ html.webf-engine .miot-app * { transform-origin: 0 0; }
 .song-title, .song-meta { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .song-title { font-size: 15px; }
 .song-meta { color: var(--md-on-surface-variant); font-size: 12px; }
+/* 「上次播放」标记：切回某个歌单时一眼看到该从哪首接着放（进度按设备 × 歌单各记一份）。 */
+.song-last-played { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: var(--md-radius-full); background: var(--md-secondary-container); color: var(--md-on-secondary-container); font-size: 11px; line-height: 18px; vertical-align: middle; }
 .song-actions { display: flex; align-items: center; gap: 2px; }
 .song-row-current .song-title { font-weight: 500; }
 .player-bar-shell { position: fixed; z-index: 80; right: 0; bottom: 0; left: 0; height: calc(90px + var(--sl-safe-bottom, 0px)); padding-bottom: var(--sl-safe-bottom, 0px); background: var(--md-surface); border-top: 1px solid var(--md-outline-variant); }

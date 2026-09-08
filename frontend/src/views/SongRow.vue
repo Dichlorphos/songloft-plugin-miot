@@ -27,6 +27,11 @@ let appliedNonce = 0;
 const COVER_SLOT_WATCHDOG_MS = 6000;
 
 function isCurrent() { return state.player.current_song?.id === props.song.id; }
+/**
+ * 本歌单上次播到的那首（每设备 × 每歌单各记一份）。
+ * 正在播的那首已经有自己的高亮，就不再重复挂标记。
+ */
+function isLastPlayed() { return !isCurrent() && state.playlistProgress?.song_id === props.song.id; }
 function duration(seconds?: number) {
   if (!seconds || seconds < 0) return '';
   const minutes = Math.floor(seconds / 60);
@@ -121,7 +126,9 @@ onUnmounted(() => {
         <SlIcon v-else name="music_note" :size="24" />
       </span>
       <span class="song-copy">
-        <span class="song-title">{{ song.title || '未知歌曲' }}</span>
+        <!-- 标记放在歌名**前面**：.song-title 是 nowrap + ellipsis，挂在后面会被长歌名截掉，
+             而这个标记恰恰是长歌名时也必须看得见的东西 -->
+        <span class="song-title"><span v-if="isLastPlayed()" class="song-last-played">上次播放</span>{{ song.title || '未知歌曲' }}</span>
         <span class="song-meta">{{ song.artist || '未知艺术家' }}<span v-if="song.album"> · {{ song.album }}</span><span v-if="duration(song.duration)"> · {{ duration(song.duration) }}</span></span>
       </span>
     </button>

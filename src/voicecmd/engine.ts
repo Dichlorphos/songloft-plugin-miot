@@ -7,7 +7,7 @@
 import { ConfigManager } from '../config/manager';
 import { AccountManager } from '../account/manager';
 import { MinaService } from '../service/service';
-import { PlaylistManagerMap } from '../player/manager';
+import { PlaylistManagerMap, resolvePlaylistResumeStart } from '../player/manager';
 import { IndexingManager } from '../indexing/manager';
 import { GroupCoordinator } from '../group/coordinator';
 import { URLBuilder } from '../player/url_builder';
@@ -1030,25 +1030,25 @@ export class VoiceEngine {
 
     songloft.log.info(`[VoiceEngine] Matched playlist: ${matchedPlaylist.name} (id=${matchedPlaylist.id})`);
 
-    // 获取设备配置中的播放模式和起始位置
-    let startIndex = 0;
+    // 获取设备配置中的播放模式
     let playMode: PlayMode = 'order';
 
     const devices = await this.configManager.getDevices(accountId);
     const devCfg = devices.find(d => d.device_id === deviceId);
-    if (devCfg) {
-      if (devCfg.playlist_id === matchedPlaylist.id) {
-        // 同一个歌单，从上次位置继续
-        startIndex = devCfg.current_song_index || 0;
-      }
-      if (devCfg.play_mode) {
-        playMode = devCfg.play_mode as PlayMode;
-      }
+    if (devCfg && devCfg.play_mode) {
+      playMode = devCfg.play_mode as PlayMode;
     }
+
+    // 起始位置查「每设备 × 每歌单」的进度表：中途切去别的歌单再切回来，这个歌单
+    // 依然从自己上次那首接着播。按 song_id 定位，歌单排序变化/增删歌后不会串歌。
+    const resume = await resolvePlaylistResumeStart(this.configManager, pm.getPrimary(), matchedPlaylist.id);
+    const startIndex = resume ? resume.songIndex : 0;
 
     // 播放歌单
     pm.setAnnounceOnSongChange(true);
-    const ok = await pm.play(matchedPlaylist.id, startIndex, playMode);
+    const ok = resume && resume.songId > 0
+      ? await pm.playPlaylistFromSong(matchedPlaylist.id, resume.songId, playMode, startIndex)
+      : await pm.play(matchedPlaylist.id, startIndex, playMode);
     if (ok) {
       songloft.log.info(`[VoiceEngine] Play playlist success: ${matchedPlaylist.name} index=${startIndex} mode=${playMode}`);
       return;

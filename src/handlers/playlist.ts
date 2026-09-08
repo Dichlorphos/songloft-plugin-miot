@@ -3,10 +3,10 @@
 
 import { jsonResponse, parseQuery } from '@songloft/plugin-sdk';
 import type { Router, HTTPRequest } from '@songloft/plugin-sdk';
-import { PlaylistManagerMap, isTempPlaylistId, normalizePlayMode } from '../player/manager';
+import { PlaylistManagerMap, isTempPlaylistId, normalizePlayMode, resolvePlaylistResumeStart } from '../player/manager';
 import type { PlaylistManager } from '../player/manager';
 import { MinaService } from '../service/service';
-import { ConfigManager } from '../config/manager';
+import { ConfigManager, playlistProgressScope } from '../config/manager';
 import { callHostAPI } from '../utils/http';
 import { findFavoritesPlaylist } from '../utils/favorites';
 import type { PlayMode, PlayState } from '../types';
@@ -284,9 +284,10 @@ export async function resolvePlayerStatus(
 
 /**
  * 注册歌单播放相关路由
- * GET  /playlists            → 获取歌单列表
- * GET  /playlists/:id/songs  → 获取歌单歌曲
- * POST /player/play          → 播放歌单
+ * GET  /playlists              → 获取歌单列表
+ * GET  /playlists/:id/songs    → 获取歌单歌曲
+ * GET  /playlists/:id/progress → 该设备在该歌单上次播到哪一首
+ * POST /player/play            → 播放歌单（start_position: first/resume/random）
  * POST /player/stop          → 停止播放
  * POST /player/previous      → 上一首
  * POST /player/next          → 下一首
@@ -359,11 +360,57 @@ export function registerPlaylistHandlers(
     }
   });
 
+  // GET /playlists/:id/progress - 查询某设备在该歌单上次播到哪一首（每设备 × 每歌单各一份）
+  router.get('/playlists/:id/progress', async (req: HTTPRequest, params: Record<string, string>) => {
+    try {
+      const query = parseQuery(req.query);
+      const { account_id, device_id } = query;
+      if (!account_id || !device_id) {
+        return jsonResponse({ success: false, error: 'account_id and device_id are required' });
+      }
+      const playlistId = Number(params.id);
+      if (!playlistId || isNaN(playlistId)) {
+        return jsonResponse({ success: false, error: 'invalid playlist id' });
+      }
+      // 临时歌单（语音「播放歌手XX」等）只活在内存里，本来就不记进度
+      if (isTempPlaylistId(playlistId)) {
+        return jsonResponse({ success: true, data: null });
+      }
+
+      // 分组设备的进度记在主设备名下；resolvePrimary 是同步只读解析，不会顺手建 manager
+      const primary = playlistManagerMap.resolvePrimary(account_id, device_id);
+      const stored = await configManager.getPlaylistProgress(
+        playlistProgressScope(primary.account_id, primary.device_id),
+        playlistId,
+      );
+      if (stored) {
+        return jsonResponse({ success: true, data: stored });
+      }
+      // 表里没有时走同一套惰性兜底（老版本只有 DeviceConfig 那一个歌单槽位）
+      const resume = await resolvePlaylistResumeStart(configManager, primary, playlistId);
+      if (!resume || resume.songId <= 0) {
+        return jsonResponse({ success: true, data: null });
+      }
+      return jsonResponse({
+        success: true,
+        data: {
+          playlist_id: playlistId,
+          song_id: resume.songId,
+          song_index: resume.songIndex,
+          position_sec: 0,
+          updated_at: 0,
+        },
+      });
+    } catch (e: any) {
+      return jsonResponse({ success: false, error: e.message || String(e) });
+    }
+  });
+
   // POST /player/play - 播放歌单
   router.post('/player/play', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
-      const { account_id, device_id, playlist_id, start_index, play_mode, song_id } = body;
+      const { account_id, device_id, playlist_id, start_index, play_mode, song_id, start_position } = body;
 
       if (!account_id) {
         return jsonResponse({ success: false, error: 'account_id is required' });
@@ -390,6 +437,11 @@ export function registerPlaylistHandlers(
       const startIndex = Number(start_index) || 0;
       const songId = Number(song_id) || 0;
 
+      // 起始位置：显式 song_id > start_position > start_index。
+      // start_position 与定时任务的同名参数同一套取值（'first' | 'resume' | 'random'），
+      // 缺省 'first' 即旧行为，老前端不传就一点没变。
+      const startPosition = typeof start_position === 'string' ? start_position : '';
+
       // 起始歌曲优先按 song_id 定位：调用方（网页列表）的下标可能基于一份已过期的歌单快照，
       // 与服务端此刻拉到的顺序错位就会播成邻近的歌（#59）。song_id 找不到时才退回下标。
       manager.setAnnounceOnSongChange(false);
@@ -405,6 +457,15 @@ export function registerPlaylistHandlers(
         ok = await manager.playWithSongs(songs as any, idx >= 0 ? idx : startIndex, mode, localStatus.playlist_name);
       } else if (songId > 0) {
         ok = await manager.playPlaylistFromSong(playlistId, songId, mode, startIndex);
+      } else if (startPosition === 'resume') {
+        // 网页「继续播放」：回到这个歌单上次播到的那一首（每设备 × 每歌单各记一份，
+        // 中途切去别的歌单也不影响），没有记录就从头播
+        const resume = await resolvePlaylistResumeStart(configManager, manager.getPrimary(), playlistId);
+        ok = resume && resume.songId > 0
+          ? await manager.playPlaylistFromSong(playlistId, resume.songId, mode, resume.songIndex)
+          : await manager.play(playlistId, resume ? resume.songIndex : 0, mode);
+      } else if (startPosition === 'random') {
+        ok = await manager.play(playlistId, 0, mode, { randomStart: true });
       } else {
         ok = await manager.play(playlistId, startIndex, mode);
       }

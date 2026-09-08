@@ -11,12 +11,25 @@ import SlListView from '../ui/SlListView.vue';
 import SlSelect from '../ui/SlSelect.vue';
 import { openSelect } from '../ui/selectState';
 import { navigation, openPage } from '../runtime';
-import { currentDevice, deviceName, messageOf, playlistLabel, playSong, refreshAll, selectPlaylist, state, visibleSongs } from '../store';
+import { currentDevice, deviceName, lastPlayedSong, messageOf, playlistLabel, playSong, refreshAll, resumePlaylist, selectPlaylist, state, visibleSongs } from '../store';
 import type { SelectOption, Song } from '../types';
 
 const search = ref('');
 const playlistOptions = computed<SelectOption[]>(() => state.playlists.map((p) => ({ value: String(p.id), label: playlistLabel(p), searchText: p.name })));
 const noServerHint = computed(() => !state.config.server_host || state.config.server_host_status === 'loopback');
+// 有进度记录 + 有设备才给「继续播放」。歌曲列表未必已加载完（歌名靠它取），
+// 所以只用 playlistProgress 判断能不能续播，歌名有就显示在 title 里。
+const canResume = computed(() => {
+  if (!state.selectedPlaylistId || !currentDevice.value) return false;
+  if (!state.playlistProgress?.song_id) return false;
+  // 音箱此刻正播/正暂停在这个歌单上就不给「继续」：那一按等于把当前这首从头重放
+  const onThisPlaylist = String(state.player.playlist_id ?? '') === state.selectedPlaylistId;
+  return !(onThisPlaylist && (state.player.state === 'playing' || state.player.state === 'paused'));
+});
+const resumeTitle = computed(() => {
+  const song = lastPlayedSong.value;
+  return song ? `从上次播放的《${song.title || '未知歌曲'}》继续` : '从上次播放的那首继续';
+});
 const listMeasureRetries = 6;
 let listMeasureTimer: ReturnType<typeof setTimeout> | null = null;
 let locateTimer: ReturnType<typeof setTimeout> | null = null;
@@ -185,6 +198,9 @@ function openDevicePicker() {
 async function play(song: Song, index: number) {
   try { await playSong(song, index); } catch (error) { /* store already presents the error */ notifyLocal(error); }
 }
+async function resume() {
+  try { await resumePlaylist(); } catch (error) { /* store already presents the error */ notifyLocal(error); }
+}
 function notifyLocal(error: unknown) { console.warn('[miot] play failed', messageOf(error)); }
 /**
  * 滚到指定行并居中。
@@ -274,6 +290,16 @@ onUnmounted(() => {
       <div class="toolbar-field">
         <SlSelect :model-value="state.selectedPlaylistId" :options="playlistOptions" placeholder="选择歌单" allow-empty searchable search-placeholder="搜索歌单" aria-label="选择歌单" @update:model-value="onPlaylist" />
       </div>
+      <!-- 有上次播放记录才出现：从这个歌单自己的进度接着播，不受中间切过别的歌单影响 -->
+      <SlButton
+        v-if="canResume"
+        variant="tonal"
+        icon="play_arrow"
+        label="继续播放"
+        :disabled="state.playerBusy"
+        :title="resumeTitle"
+        @click="resume"
+      />
     </div>
 
     <div v-if="state.selectedPlaylistId" class="search-bar">
