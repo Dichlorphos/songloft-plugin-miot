@@ -36,6 +36,22 @@ const EXTERNAL_STOP_POLL_INTERVAL_MS = 20000;
 const EXTERNAL_STOP_TAIL_GUARD_SEC = 15;
 /** 连续命中"未在播放"多少次才判定为真实外部停止，抵御小爱偶发误报（单次误报会被下一轮探测纠正） */
 const EXTERNAL_STOP_CONFIRM_COUNT = 2;
+/**
+ * 两次探测间设备位置推进多少秒才算「其实还在播放」（songloft-org/songloft#449）。
+ *
+ * 小爱在推流播放下会把正常播放**连续**误报成 status=2，两次确认根本挡不住：#449 的日志里
+ * 起播后第 1、2 次探测都报 status=2，插件据此下发 pause+stop，把在放的音频真停了；
+ * 而同一份上报里的 position 一路推进到 43s（恰好是下发 stop 的时刻），证明 status 在骗人、
+ * position 是准的。所以 status 不再是唯一判据：位置明显推进就判定 status 误报。
+ *
+ * 探测间隔 20s，真在播放时位置会推进约 20s，取 5s 阈值容忍上报抖动与网络延迟。
+ * 设备真停了位置会冻结或归零，都不满足推进，仍走原来的两次确认。
+ *
+ * 位置基线只在**连续「未在播放」上报的序列内部**有效，一旦读到 status=1 就清空：跨越
+ * 一次正常上报去比位置，会把「上一轮还在播、本轮真被停在更靠后的位置」当成推进而放过，
+ * 真实外部停止的确认要多等两轮（#408 那类「关机后又自动播放」就有机会复发）。
+ */
+const EXTERNAL_STOP_POSITION_ADVANCE_MIN_SEC = 5;
 
 /**
  * 外部恢复探测参数（songloft-org/songloft-plugin-miot#95）。
@@ -211,6 +227,7 @@ export class PlaylistManager {
   private checkTimer: any = null;       // 定时器ID（基于歌曲时长的切歌定时器）
   private stopPollTimer: any = null;    // 定时器ID（后台探测外部停止，见 EXTERNAL_STOP_* 常量）
   private stopPollMisses: number = 0;   // 连续探测到设备"未在播放"的次数
+  private stopPollLastPosition: number = -1; // 上次探测读到的设备流内位置（秒），-1 = 还没有基线
   private resumePollTimer: any = null;  // 定时器ID（后台探测外部恢复，见 EXTERNAL_RESUME_* 常量）
   private resumePollStartedAt: number = 0;
   private resumePollHits: number = 0;   // 连续探测到设备"在播放"的次数
@@ -488,8 +505,13 @@ export class PlaylistManager {
 
   /**
    * 停止播放
+   *
+   * @param pushToDevice - 是否向设备下发 stop 指令。默认 true（用户/语音/定时等主动停止）。
+   *   外部停止探测传 false：那条路径的前提是「设备已经自己停了」，下发 pause+stop 在判断
+   *   正确时是多余动作，判断错误时会把正在播放的音频真停掉（#449）。本地状态、续播锚点、
+   *   外部恢复探测等收尾动作与主动停止完全一致。
    */
-  async stop(): Promise<void> {
+  async stop(pushToDevice = true): Promise<void> {
     this.stopCheckTimer();
     this.clearVoiceSuspend();
     this.state = 'stopped';
@@ -498,9 +520,11 @@ export class PlaylistManager {
     this.streamSeekOffsetSec = 0;
     this.transitionOffset = 0;
 
-    await this.forEachTarget('stop', t => this.minaService.stopPlay(t.account_id, t.device_id));
+    if (pushToDevice) {
+      await this.forEachTarget('stop', t => this.minaService.stopPlay(t.account_id, t.device_id));
+    }
 
-    songloft.log.info('[PlaylistManager] Playback stopped');
+    songloft.log.info(`[PlaylistManager] Playback stopped pushToDevice=${pushToDevice}`);
 
     // 清掉重载续播锚点：停止之后重载不该再自动出声（#96）
     await this.persistState();
@@ -1649,30 +1673,44 @@ export class PlaylistManager {
    * （如语音"关机"未被 ConversationMonitor 捕获、且网页/App 已关闭没有客户端轮询校准）。
    *
    * 小爱在 URL/MUSIC 模式下会偶发把正常播放误报成 stopped/paused（同类风险见
-   * handlers/playlist.ts 的 syncManagerFromDeviceState 注释），因此不能凭单次探测下结论：
-   * 连续 EXTERNAL_STOP_CONFIRM_COUNT 次（每次间隔 EXTERNAL_STOP_POLL_INTERVAL_MS）都确认
-   * 未在播放才停止，单次误报会被下一轮探测自动纠正。
+   * handlers/playlist.ts 的 syncManagerFromDeviceState 注释），而且会**连续**误报，两次确认
+   * 挡不住（#449）。因此 status 不是唯一判据：连续两次「未在播放」上报之间 position 若明显
+   * 推进，说明设备其实在播，按 status 误报处理并清零计数
+   * （见 EXTERNAL_STOP_POSITION_ADVANCE_MIN_SEC）。
    */
   private async checkExternalStop(remainingBudgetMs: number): Promise<void> {
     if (this.state !== 'playing') return;
     const indexAtCheck = this.currentIndex;
 
     try {
-      const { status } = await this.minaService.getPlayState(this.accountId, this.deviceId);
+      const { status, position } = await this.minaService.getPlayState(this.accountId, this.deviceId);
       // 探测期间状态已变化（暂停/停止/切歌）：交给触发那次操作的逻辑处理，这里不再插手
       if (this.state !== 'playing' || this.currentIndex !== indexAtCheck) return;
 
       if (status === 1) {
         this.stopPollMisses = 0;
+        this.stopPollLastPosition = -1; // 见常量注释：基线不跨越正常上报
       } else if (status >= 0) {
-        this.stopPollMisses++;
-        if (this.stopPollMisses >= EXTERNAL_STOP_CONFIRM_COUNT) {
-          songloft.log.info(`[PlaylistManager] External stop confirmed (status=${status}, misses=${this.stopPollMisses}), cancelling auto-next`);
-          await this.stop();
-          return;
+        // 位置相比上一次探测明显推进 → status 在误报，设备其实还在放
+        const advanced = this.stopPollLastPosition >= 0
+          && position - this.stopPollLastPosition >= EXTERNAL_STOP_POSITION_ADVANCE_MIN_SEC;
+        this.stopPollLastPosition = position;
+        if (advanced) {
+          songloft.log.info(`[PlaylistManager] External stop ignored: status=${status} but position advanced to ${position}s, device still playing`);
+          this.stopPollMisses = 0;
+        } else {
+          this.stopPollMisses++;
+          if (this.stopPollMisses >= EXTERNAL_STOP_CONFIRM_COUNT) {
+            songloft.log.info(`[PlaylistManager] External stop confirmed (status=${status}, position=${position}s, misses=${this.stopPollMisses}), cancelling auto-next`);
+            // 不向设备下发 stop：前提本就是「设备已经自己停了」，下发在判断正确时多余、
+            // 判断错误时才是真正掐掉播放的那一刀。漏网的误判由 stop() 张开的外部恢复
+            // 探测在半个分钟内重新接管，从「直接静音」降级为「可自愈」（#449）。
+            await this.stop(false);
+            return;
+          }
         }
       }
-      // status < 0（查询失败/网络抖动）：不计入未命中，避免网络问题误判为外部停止
+      // status < 0（查询失败/网络抖动）：不计入未命中、不动位置基线，避免网络问题误判为外部停止
     } catch (e) {
       songloft.log.warn('[PlaylistManager] checkExternalStop query failed: ' + String(e));
     }
@@ -1695,6 +1733,7 @@ export class PlaylistManager {
       this.stopPollTimer = null;
     }
     this.stopPollMisses = 0;
+    this.stopPollLastPosition = -1;
     if (this.durationProbeTimer !== null) {
       clearTimeout(this.durationProbeTimer);
       this.durationProbeTimer = null;

@@ -420,17 +420,43 @@ function targetBody() {
   return { account_id: state.currentAccountId, device_id: state.currentDeviceId };
 }
 
+/**
+ * 播放指令去重窗口（songloft-org/songloft#449）。
+ * playerCommand 的 playerBusy 只覆盖请求在途期间：它在 refreshPlayerStatus 走完就释放，
+ * 紧随其后的同一个播放意图（一次点击触发两个事件，或用户手抖点了两下）照样发得出去，
+ * 结果是同一首歌在一两秒内向音箱连推两次 play-music。这种重复下发没有意义，丢掉后一次。
+ */
+const PLAY_DEDUP_WINDOW_MS = 1500;
+let lastPlayIntentKey = '';
+let lastPlayIntentAt = 0;
+
+async function runPlayIntent(key: string, run: () => Promise<void>): Promise<void> {
+  const now = Date.now();
+  if (key === lastPlayIntentKey && now - lastPlayIntentAt < PLAY_DEDUP_WINDOW_MS) return;
+  lastPlayIntentKey = key;
+  lastPlayIntentAt = now;
+  try {
+    await run();
+  } catch (error) {
+    // 下发失败不该连用户紧接着的重试一起吞掉
+    lastPlayIntentKey = '';
+    throw error;
+  }
+}
+
 export async function playSong(song: Song, visibleIndex?: number): Promise<void> {
   if (!state.selectedPlaylistId) throw new Error('请先选择歌单');
   const fallbackIndex = state.songs.findIndex((item) => item.id === song.id);
-  await playerCommand('/player/play', {
-    ...targetBody(),
-    playlist_id: Number(state.selectedPlaylistId),
-    song_id: song.id,
-    start_index: fallbackIndex >= 0 ? fallbackIndex : visibleIndex || 0,
-    play_mode: state.player.play_mode || 'order',
+  await runPlayIntent(`song:${state.selectedPlaylistId}:${song.id}`, async () => {
+    await playerCommand('/player/play', {
+      ...targetBody(),
+      playlist_id: Number(state.selectedPlaylistId),
+      song_id: song.id,
+      start_index: fallbackIndex >= 0 ? fallbackIndex : visibleIndex || 0,
+      play_mode: state.player.play_mode || 'order',
+    });
+    void refreshPlaylistProgress();
   });
-  void refreshPlaylistProgress();
 }
 
 /**
@@ -440,13 +466,15 @@ export async function playSong(song: Song, visibleIndex?: number): Promise<void>
  */
 export async function resumePlaylist(): Promise<void> {
   if (!state.selectedPlaylistId) throw new Error('请先选择歌单');
-  await playerCommand('/player/play', {
-    ...targetBody(),
-    playlist_id: Number(state.selectedPlaylistId),
-    start_position: 'resume',
-    play_mode: state.player.play_mode || 'order',
+  await runPlayIntent(`resume:${state.selectedPlaylistId}`, async () => {
+    await playerCommand('/player/play', {
+      ...targetBody(),
+      playlist_id: Number(state.selectedPlaylistId),
+      start_position: 'resume',
+      play_mode: state.player.play_mode || 'order',
+    });
+    void refreshPlaylistProgress();
   });
-  void refreshPlaylistProgress();
 }
 
 export async function playerCommand(path: string, body: Record<string, unknown> = {}): Promise<void> {
