@@ -34,7 +34,10 @@ const groupEditor = ref(false);
 const editGroupId = ref('');
 const groupName = ref('');
 const selectedMembers = ref<string[]>([]);
-let qrTimer: ReturnType<typeof setInterval> | null = null;
+let qrTimer: ReturnType<typeof setTimeout> | null = null;
+// 每次 startQr 自增的代次；旧 pollQrOnce 发现 gen 不匹配即退出，
+// 避免用户连点"获取二维码"时旧轮询链劫持新一轮（旧链 resolved 后用旧 account_id 重排）。
+let qrGen = 0;
 
 const hostOptions = computed<SelectOption[]>(() => [
   ...(Array.isArray(state.config.suggested_addresses) ? state.config.suggested_addresses : []).map((value) => ({ value, label: value })),
@@ -54,7 +57,8 @@ onMounted(() => {
 watch(groupEditor, (open) => { navigation.editorOpen = open; });
 onUnmounted(() => {
   navigation.editorOpen = false;
-  if (qrTimer) clearInterval(qrTimer);
+  qrGen++; // 让任何在飞的 pollQrOnce 因 gen 不匹配而退出
+  stopQrPolling();
 });
 
 async function saveServerHost() {
@@ -94,15 +98,31 @@ async function submitPassword() {
     const result = await postEnvelope<Record<string, unknown>>('/auth/login', { username: username.value.trim(), password: password.value });
     loginAccountId.value = String(result.account_id || username.value.trim());
     loginMessage.value = String(result.message || '');
-    if (result.state === 'need_captcha' || result.state === 1) { captchaImage.value = String(result.captcha_url || ''); loginMessage.value = '请输入图形验证码'; }
-    else if (result.state === 'need_verify' || result.state === 2) { verifyUrl.value = String(result.verify_url || ''); loginMessage.value = '请完成二次验证后输入验证码'; }
-    else { notify('账号登录成功', 'success'); username.value = ''; password.value = ''; captchaImage.value = ''; await loadAccountsAndDevices(); }
+    if (result.state === 'need_captcha' || result.state === 1) {
+      captchaImage.value = String(result.captcha_url || '');
+      captcha.value = '';
+      loginMessage.value = captchaImage.value ? '请输入图形验证码' : '需要图形验证码，但未获取到验证码图片（见插件日志）';
+    }
+    else if (result.state === 'need_verify' || result.state === 2) { verifyUrl.value = String(result.verify_url || ''); verifyCode.value = ''; loginMessage.value = '请完成二次验证后输入验证码'; }
+    else if (result.state === 'success' || result.state === 0) { notify('账号登录成功', 'success'); username.value = ''; password.value = ''; captchaImage.value = ''; loginMessage.value = ''; await loadAccountsAndDevices(); }
+    else { loginMessage.value = String(result.message || '登录失败'); notify(loginMessage.value, 'error'); }
   } catch (error) { loginMessage.value = messageOf(error); notify(loginMessage.value, 'error'); }
   finally { loginBusy.value = false; }
 }
 async function submitCaptcha() {
   if (!captcha.value) return;
-  try { const result = await postEnvelope<Record<string, unknown>>('/auth/captcha', { account_id: loginAccountId.value, captcha: captcha.value }); loginMessage.value = String(result.message || ''); if (result.state === 'need_captcha' || result.state === 1) { captchaImage.value = String(result.captcha_url || ''); loginMessage.value = '验证码错误，请重新输入'; } else if (result.state === 'success' || result.state === 0) { captchaImage.value = ''; notify('登录成功', 'success'); await loadAccountsAndDevices(); } } catch (error) { notify(messageOf(error), 'error'); }
+  try {
+    const result = await postEnvelope<Record<string, unknown>>('/auth/captcha', { account_id: loginAccountId.value, captcha: captcha.value });
+    loginMessage.value = String(result.message || '');
+    if (result.state === 'need_captcha' || result.state === 1) {
+      captchaImage.value = String(result.captcha_url || '');
+      captcha.value = '';
+      loginMessage.value = captchaImage.value ? '验证码错误，请重新输入' : '验证码错误，且未获取到新图片（见插件日志）';
+    }
+    else if (result.state === 'need_verify' || result.state === 2) { verifyUrl.value = String(result.verify_url || ''); loginMessage.value = '请完成二次验证后输入验证码'; }
+    else if (result.state === 'success' || result.state === 0) { captchaImage.value = ''; captcha.value = ''; loginMessage.value = ''; notify('登录成功', 'success'); await loadAccountsAndDevices(); }
+    else { loginMessage.value = String(result.message || '验证失败'); notify(loginMessage.value, 'error'); }
+  } catch (error) { loginMessage.value = messageOf(error); notify(loginMessage.value, 'error'); }
 }
 async function submitVerify() {
   if (!verifyCode.value) return;
@@ -115,20 +135,41 @@ async function addToken() {
   if (!tokenUserId.value.trim() || !passToken.value.trim()) { notify('请填写 User ID 和 Pass Token', 'warning'); return; }
   try { await postEnvelope('/auth/token', { user_id: tokenUserId.value.trim(), pass_token: passToken.value.trim() }); notify('Token 账号添加成功', 'success'); tokenUserId.value = ''; passToken.value = ''; await loadAccountsAndDevices(); } catch (error) { notify(messageOf(error), 'error'); }
 }
+function stopQrPolling() {
+  if (qrTimer) { clearTimeout(qrTimer); qrTimer = null; }
+}
+async function pollQrOnce(gen: number) {
+  if (gen !== qrGen) return; // 已被新的 startQr 或卸载取代
+  let keepGoing = true;
+  try {
+    const poll = await postEnvelope<Record<string, unknown>>('/auth/qrcode/poll', { account_id: loginAccountId.value });
+    if (gen !== qrGen) return; // await 期间被取代，丢弃这一轮结果
+    if (poll.state === 'success') {
+      stopQrPolling(); keepGoing = false;
+      if (poll.account_id) loginAccountId.value = String(poll.account_id);
+      qrStatus.value = '登录成功'; notify('扫码登录成功', 'success'); await loadAccountsAndDevices();
+    } else if (poll.state === 'expired' || poll.state === 'timeout' || poll.state === 'error') {
+      stopQrPolling(); keepGoing = false;
+      qrStatus.value = String(poll.message || '二维码已过期');
+    }
+    // state === 'waiting'：继续轮询
+  } catch { /* 瞬时错误：继续轮询，不打断 */ }
+  if (keepGoing && gen === qrGen) {
+    // 串行：上一轮完全结束后再排下一轮，避免并发长轮询把小米 lp 端点打成“已过期”
+    qrTimer = setTimeout(() => pollQrOnce(gen), 3000);
+  }
+}
 async function startQr() {
-  if (qrTimer) clearInterval(qrTimer);
+  stopQrPolling();
+  const gen = ++qrGen;
   qrBusy.value = true; qrStatus.value = '正在获取二维码'; qrUrl.value = '';
   try {
     const result = await postEnvelope<Record<string, unknown>>('/auth/qrcode', {});
+    if (gen !== qrGen) return; // 取二维码期间用户又点了一次，让最后那次主导
     loginAccountId.value = String(result.account_id || ''); qrUrl.value = String(result.qrcode_url || ''); qrStatus.value = '请使用米家 App 扫码'; qrBusy.value = false;
-    qrTimer = setInterval(async () => {
-      try {
-        const poll = await postEnvelope<Record<string, unknown>>('/auth/qrcode/poll', { account_id: loginAccountId.value });
-        if (poll.state === 'success') { if (qrTimer) clearInterval(qrTimer); qrStatus.value = '登录成功'; notify('扫码登录成功', 'success'); await loadAccountsAndDevices(); }
-        else if (poll.state === 'expired' || poll.state === 'timeout' || poll.state === 'error') { if (qrTimer) clearInterval(qrTimer); qrStatus.value = String(poll.message || '二维码已过期'); }
-      } catch { /* keep polling; transient errors are expected */ }
-    }, 2500);
-  } catch (error) { qrBusy.value = false; qrStatus.value = messageOf(error); notify(qrStatus.value, 'error'); }
+    // 首次延迟 1.5s，之后 pollQrOnce 串行自驱动（上一轮结束 → 3s 后下一轮）
+    qrTimer = setTimeout(() => pollQrOnce(gen), 1500);
+  } catch (error) { if (gen === qrGen) { qrBusy.value = false; qrStatus.value = messageOf(error); notify(qrStatus.value, 'error'); } }
 }
 async function relogin(id: string) { try { await postEnvelope('/auth/relogin', { account_id: id }); notify('重新登录成功', 'success'); await loadAccountsAndDevices(); } catch (error) { notify(messageOf(error), 'warning'); } }
 async function removeAccount(id: string) { if (await confirmAction('删除账号', `确定删除账号“${id}”吗？此操作不可撤销。`, '删除', true)) { try { await import('../../api').then(({ del }) => del(`/account?account_id=${encodeURIComponent(id)}`)); notify('账号已删除', 'success'); await loadAccountsAndDevices(); } catch (error) { notify(messageOf(error), 'error'); } } }

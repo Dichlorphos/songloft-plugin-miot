@@ -144,6 +144,9 @@ export class MinaAuth {
     // httpFetch 只调用 text() 会对非 UTF-8 二进制返回空字符串，故此处直接用原生 fetch。
     const resp = await fetch(captchaUrl, { method: 'GET', headers });
 
+    const ct = resp.headers && typeof resp.headers.get === 'function' ? (resp.headers.get('content-type') || '') : '';
+    console.log(`[miot-auth] captcha fetch status=${resp.status} content-type=${ct}`);
+
     // 收集 cookies
     const setCookieHeaders = getSetCookie(resp);
     if (setCookieHeaders.length > 0) {
@@ -156,6 +159,10 @@ export class MinaAuth {
     // 将二进制图片转为 base64
     const ab = await resp.arrayBuffer();
     const bytes = new Uint8Array(ab);
+    console.log(`[miot-auth] captcha bytes=${bytes.length} ick=${ick ? 'yes' : 'no'}`);
+    if (bytes.length === 0) {
+      console.warn('[miot-auth] captcha image is empty (0 bytes)');
+    }
     let binary = '';
     for (let i = 0; i < bytes.length; i++) {
       binary += String.fromCharCode(bytes[i]);
@@ -299,6 +306,8 @@ export class MinaAuth {
       return { state: LoginState.FAILED, error: `parse response failed: ${jsonStr.slice(0, 200)}` };
     }
 
+    console.log(`[miot-auth] step2 response keys=${Object.keys(result).join(',')} code=${result['code']} desc=${result['description']} hasLocation=${!!result['location']} hasCaptchaUrl=${!!result['captchaUrl']} hasNotification=${!!result['notificationUrl']}`);
+
     // 检查是否需要二次验证（短信/邮箱）
     if (result['notificationUrl']) {
       let notificationUrl = result['notificationUrl'] as string;
@@ -315,18 +324,36 @@ export class MinaAuth {
       };
     }
 
-    // 检查是否需要图形验证码
-    if (result['captchaUrl']) {
-      let captchaUrl = result['captchaUrl'] as string;
+    // 检查是否需要图形验证码（兼容小米不同接口版本的字段名）
+    const captchaFields = ['captchaUrl', 'captchaURL', 'captcha_url', 'captcha', 'imgUrl'];
+    let captchaUrlRaw = '';
+    for (const f of captchaFields) {
+      const v = result[f];
+      if (typeof v === 'string' && v.trim()) { captchaUrlRaw = v.trim(); break; }
+    }
+    if (captchaUrlRaw) {
+      let captchaUrl = captchaUrlRaw;
       if (!captchaUrl.startsWith('http')) {
         captchaUrl = ACCOUNT_BASE_URL + captchaUrl;
       }
-
-      const captchaResult = await this.getCaptchaImage(captchaUrl);
-      return {
-        state: LoginState.NEED_CAPTCHA,
-        captchaImage: captchaResult.imageBase64,
-      };
+      console.log(`[miot-auth] need captcha, fetching image url=${captchaUrl}`);
+      try {
+        const captchaResult = await this.getCaptchaImage(captchaUrl);
+        console.log(`[miot-auth] captcha fetched b64Len=${(captchaResult.imageBase64 || '').length} ick=${captchaResult.ick ? 'yes' : 'no'}`);
+        return {
+          state: LoginState.NEED_CAPTCHA,
+          captchaImage: captchaResult.imageBase64,
+        };
+      } catch (e: any) {
+        // getCaptchaImage 失败不能让整个登录抛异常（否则前端既看不到验证码面板
+        // 又收到一条错误），降级为 need_captcha + 空图片：前端会提示"见插件日志"。
+        console.warn(`[miot-auth] getCaptchaImage failed: ${e.message || e}`);
+        return {
+          state: LoginState.NEED_CAPTCHA,
+          captchaImage: '',
+          error: `获取验证码图片失败: ${e.message || e}`,
+        };
+      }
     }
 
     // 检查是否有 location（登录成功）

@@ -73,9 +73,10 @@ export class AuthService {
     if (result.state === LoginState.NEED_CAPTCHA) {
       session.state = 'need_captcha';
       session.captchaUrl = result.captchaImage || '';
+      console.log(`[miot-auth] service.login → need_captcha b64Len=${(result.captchaImage || '').length} err=${result.error || '-'}`);
       return {
         state: 'need_captcha',
-        message: '需要图形验证码',
+        message: result.error ? `需要图形验证码（${result.error}）` : '需要图形验证码',
         captcha_url: result.captchaImage,
       };
     }
@@ -83,6 +84,7 @@ export class AuthService {
     if (result.state === LoginState.NEED_VERIFY) {
       session.state = 'need_verify';
       session.notificationUrl = result.verifyUrl || '';
+      console.log(`[miot-auth] service.login → need_verify url=${result.verifyUrl || '-'}`);
       return {
         state: 'need_verify',
         message: '需要短信/邮箱验证码',
@@ -117,6 +119,7 @@ export class AuthService {
       // 启动 Token 刷新定时器
       this.startTokenRefresh(accountId);
 
+      console.log(`[miot-auth] service.login → success userId=${result.tokenInfo.user_id}`);
       return { state: 'success', message: '登录成功' };
     }
 
@@ -124,6 +127,7 @@ export class AuthService {
     session.state = 'failed';
     session.errorMessage = result.error || '未知错误';
     this.sessionManager.deleteSession(accountId);
+    console.log(`[miot-auth] service.login → failed err=${result.error || '未知错误'}`);
     return { state: 'failed', message: result.error || '登录失败' };
   }
 
@@ -136,9 +140,11 @@ export class AuthService {
   async submitCaptcha(accountId: string, captchaCode: string): Promise<LoginResult> {
     const session = this.sessionManager.getSession(accountId);
     if (!session || !session.auth) {
+      console.log(`[miot-auth] submitCaptcha: session expired, account=${accountId}`);
       return { state: 'failed', message: '会话已过期，请重新登录' };
     }
 
+    console.log(`[miot-auth] submitCaptcha: account=${accountId} codeLen=${captchaCode.length}`);
     const result = await session.auth.loginWithCaptcha(captchaCode, MINA_SID);
     return this.handleAuthResult(accountId, session, result);
   }
@@ -760,9 +766,10 @@ export class AuthService {
 
     if (result.state === LoginState.NEED_CAPTCHA) {
       session.state = 'need_captcha';
+      console.log(`[miot-auth] handleAuthResult → need_captcha b64Len=${(result.captchaImage || '').length} err=${result.error || '-'}`);
       return {
         state: 'need_captcha',
-        message: '需要图形验证码',
+        message: result.error ? `需要图形验证码（${result.error}）` : '需要图形验证码',
         captcha_url: result.captchaImage,
       };
     }

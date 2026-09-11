@@ -66,6 +66,8 @@ export class QRCodeLogin {
   private deviceId: string;
   private userAgent: string;
   private pollCount: number = 0;
+  /** 连续非零码计数：避免单次瞬时非零码误判二维码过期 */
+  private nonZeroStreak: number = 0;
   private onStateChange?: (state: QRCodeState, result?: PollResult) => void;
 
   constructor(onStateChange?: (state: QRCodeState, result?: PollResult) => void) {
@@ -199,9 +201,11 @@ export class QRCodeLogin {
     }
 
     this.pollCount++;
+    console.log(`[miot-qr] poll: start pollCount=${this.pollCount} maxPoll=${MAX_POLL_COUNT}`);
 
     // 超过最大轮询次数，认为二维码已过期
     if (this.pollCount > MAX_POLL_COUNT) {
+      console.log(`[miot-qr] poll: expired (max poll count ${MAX_POLL_COUNT} reached)`);
       this.updateState('expired');
       return { state: 'expired', message: 'QR code expired (max poll count reached)' };
     }
@@ -210,6 +214,12 @@ export class QRCodeLogin {
       const headers: Record<string, string> = {
         'User-Agent': this.userAgent,
         'Content-Type': 'application/x-www-form-urlencoded',
+        // 小米 lp 是长轮询（服务端会阻塞到状态变化，最长 ~30s）。
+        // 但插件每个 HTTP 请求都在一次 ExecuteJS 里跑完，受 30s 墙钟超时约束
+        // （internal/jsruntime defaultJSTimeout）。给 fetch 设 25s 硬上限，让它在
+        // 墙钟超时前可靠返回 waiting，否则 ExecuteJS 超时会让请求报错、后台
+        // fetch goroutine 成为孤儿、并和下一轮 poll 叠加把 lp 打成"已过期"。
+        'X-Fetch-Timeout-Ms': '25000',
       };
 
       const cookieHeader = this.cookieJar.getCookieHeader(this.pollUrl);
@@ -227,6 +237,7 @@ export class QRCodeLogin {
       } catch (e: any) {
         // 超时处理：fetch 阻塞超时后抛出异常
         const errMsg = String(e.message || e).toLowerCase();
+        console.log(`[miot-qr] poll: fetch error msg=${e.message || e} treatedAs=${errMsg.includes('timeout') || errMsg.includes('deadline') || errMsg.includes('canceled') || errMsg.includes('aborted') ? 'waiting(timeout)' : 'fatal'}`);
         if (errMsg.includes('timeout') || errMsg.includes('deadline') ||
             errMsg.includes('canceled') || errMsg.includes('aborted')) {
           // 超时 = 还在等待用户扫码
@@ -238,10 +249,12 @@ export class QRCodeLogin {
       // 检查 HTTP 状态码
       const status = response.status;
       if (status === 403) {
+        console.log('[miot-qr] poll: 403 Forbidden → expired');
         this.updateState('expired');
         return { state: 'expired', message: 'QR code expired (403 Forbidden)' };
       }
       if (status >= 400) {
+        console.log(`[miot-qr] poll: HTTP ${status} → failed`);
         this.updateState('failed');
         return { state: 'failed', message: `poll failed: HTTP ${status}` };
       }
@@ -261,10 +274,17 @@ export class QRCodeLogin {
       const code = Number(pollData['code'] || 0);
       if (code !== 0) {
         const desc = getStringValue(pollData, 'desc', 'unknown error');
-        // code != 0 通常表示二维码过期或失败
-        this.updateState('expired');
-        return { state: 'expired', message: `QR code login failed: code=${code}, desc=${desc}` };
+        this.nonZeroStreak++;
+        console.log(`[miot-qr] poll: non-zero code code=${code} desc=${desc} streak=${this.nonZeroStreak} pollCount=${this.pollCount} keys=${Object.keys(pollData).join(',')}`);
+        // 小米 lp 端点偶发非零码（瞬时重连/并发残留）不应一次就判过期；
+        // 连续 >=2 次非零码才认定二维码真正过期，避免误杀正在等待的二维码
+        if (this.nonZeroStreak >= 2) {
+          this.updateState('expired');
+          return { state: 'expired', message: `QR code expired: code=${code}, desc=${desc}` };
+        }
+        return { state: 'waiting', message: `transient non-zero code ${code}, retrying` };
       }
+      this.nonZeroStreak = 0;
 
       // 检查是否有 passToken 和 userId（扫码成功并确认）
       const passToken = getStringValue(pollData, 'passToken', '');
@@ -384,6 +404,7 @@ export class QRCodeLogin {
     this.qs = '';
     this.callback = '';
     this.pollCount = 0;
+    this.nonZeroStreak = 0;
     this.cookieJar.clear();
   }
 
