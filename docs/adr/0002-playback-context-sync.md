@@ -3,7 +3,7 @@
 - 状态：提议
 - 日期：2026-09-12
 
-本方案取代 [ADR-0001](0001-cross-device-playback-sync.md)。当前为需求方案，试做代码已还原；实现状态和待确认边界见 [需求文档](../../.scratch/playback-sync/spec.md)。
+本方案取代 [ADR-0001](0001-cross-device-playback-sync.md)。本文仅记录需求方案；代码基线和待确认边界见 [需求文档](../../.scratch/playback-sync/spec.md)。
 
 ## 决策
 
