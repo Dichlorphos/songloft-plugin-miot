@@ -18,7 +18,7 @@ Status: ready-for-agent
 
 - 播放至少一台目标设备成功后写快照；pause 写 paused 位置；stop 保留 stopped。
 - 快照有效期 30 分钟；unknown、超时、离线和存储失败不清除既有记录。
-- 切换只覆盖目标 PlaylistManager 内存上下文，不向音箱播放、暂停或停止。
+- 切换只保存待播放上下文，不覆盖目标 PlaylistManager，也不向音箱播放、暂停或停止。
 - 继续播放恢复歌曲、位置、倍速和播放模式；playing 位置不做额外外推。
 - 临时歌单和外部播放不参与同步；快照按账号隔离。
 - 歌曲按 ID、索引、歌单首曲回退；歌单不存在时保持目标现状并返回错误。
@@ -49,4 +49,5 @@ Status: ready-for-agent
 
 
 - 切换时不因目标 paused/stopped 而提前覆盖目标 PlaylistManager；所有目标状态统一在用户继续时消费待播放上下文。
+
 
