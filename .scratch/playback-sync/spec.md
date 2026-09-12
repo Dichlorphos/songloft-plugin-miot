@@ -11,7 +11,7 @@ Status: ready-for-agent
 | `11bd80b` | 本次需求试做前的代码基线 |
 | `94ce724`、`8b01630` | 曾试做快照持久化和最近播放接口；不代表当前能力 |
 | `ab3a53f` | 经需求收敛后还原试做，业务代码恢复到上述基线 |
-| `8cc582e`（当前核对节点） | 与试做前基线的差异全部为 Markdown 文档；无业务代码、前端、构建配置或脚本差异 |
+| 当前 HEAD（历史提交见上表） | 与试做前基线的差异全部为 Markdown 文档；无业务代码、前端、构建配置或脚本差异 |
 
 当前源码不存在试做中的 `PlaybackSnapshot`、`PlaybackSyncService`、`PlaybackResumeService`、`/player/recent-snapshot` 或 `/player/play-recent`。既有播放管理器、设备控制、设备级进度保存和热重载恢复属于原有能力，不能算作本次需求成果。历史上出现过实现提交，与当前没有代码净改动并不矛盾。
 
@@ -124,4 +124,5 @@ Status: ready-for-agent
 - 快照写入按账号串行，并以单调 `updated_at` 或 revision 拒绝旧写入，避免旧 playing 状态覆盖新 stopped 状态。
 
 当前行为和数据契约边界已确认；实现前仍需确定历史试做数据迁移和测试夹具格式。
+
 
