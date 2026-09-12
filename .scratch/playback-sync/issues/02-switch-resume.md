@@ -1,7 +1,7 @@
 # 切换设备播放上下文同步
 
 Type: task
-Status: ready-for-agent
+Status: needs-info
 Blocked by: 01
 
 实现独立设备切换后的播放上下文同步。目标设备成为当前设备后异步保存账号级未过期快照为待播放上下文；不自动播放，不新增用户入口或切换 API。现有播放/继续按钮和语音 resume 负责最终起播。
@@ -10,7 +10,7 @@ Blocked by: 01
 
 ## Progress
 
-- 2026-09-13：需求边界已完成确认并清理重复文档。
+- 2026-09-13：需求边界已完成确认；试做实现已还原，当前代码未接入本票据功能。
 - 待实现：目标 PlaylistManager 上下文注入、独立设备判断、现有播放/继续流程接入，以及 AI/普通语音 pause 分流。
 
 ## Implementation constraints
