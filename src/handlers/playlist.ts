@@ -7,9 +7,13 @@ import { PlaylistManagerMap, isTempPlaylistId, normalizePlayMode, resolvePlaylis
 import type { PlaylistManager } from '../player/manager';
 import { MinaService } from '../service/service';
 import { ConfigManager, playlistProgressScope } from '../config/manager';
+import { PlaybackSyncService } from '../service/playback-sync';
 import { callHostAPI } from '../utils/http';
 import { findFavoritesPlaylist } from '../utils/favorites';
 import type { PlayMode, PlayState } from '../types';
+
+let playbackSyncService: PlaybackSyncService | null = null;
+export function initPlaybackSync(configManager: ConfigManager): void { playbackSyncService = new PlaybackSyncService(configManager); }
 
 /** 解析请求体（兼容 Uint8Array 和 string） */
 function parseBody(req: HTTPRequest): any {
@@ -213,7 +217,9 @@ export async function resolvePlayerStatus(
     const reportState = resolveReportState(localStatus.state, cached.state);
     const reportPosition = resolveReportPosition(localStatus.state, cached.state, localStatus.position, position);
 
-    return { ...localStatus, state: reportState, position: reportPosition, duration, volume: cached.volume };
+    const result = { ...localStatus, state: reportState, position: reportPosition, duration, volume: cached.volume };
+    playbackSyncService?.record(account_id, device_id, result).catch(() => undefined);
+    return result;
   }
 
   // 缓存过期，从设备获取真实播放状态
@@ -279,7 +285,9 @@ export async function resolvePlayerStatus(
   const reportState = resolveReportState(localStatus.state, realState);
   const reportPosition = resolveReportPosition(localStatus.state, realState, localStatus.position, realPosition);
 
-  return { ...localStatus, state: reportState, position: reportPosition, duration: realDuration, volume };
+  const result = { ...localStatus, state: reportState, position: reportPosition, duration: realDuration, volume };
+  playbackSyncService?.record(account_id, device_id, result).catch(() => undefined);
+  return result;
 }
 
 /**
