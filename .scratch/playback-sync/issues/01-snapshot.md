@@ -11,3 +11,8 @@ Status: ready-for-agent
 - 2026-09-12：已完成 PlaybackSnapshot 类型、ConfigManager 持久化接口、30 分钟过期判断及状态解析流程接入。
 - 下一步：补充验证并继续实现设备切换续播票据 02。
 
+## Progress
+
+- 2026-09-12：需求重新收敛为单一能力：切换设备时同步账号级最新插件播放上下文，不自动播放，不新增最近播放入口。
+- 已移除 `GET /player/recent-snapshot` 与 `POST /player/play-recent` 公开接口。
+- 原快照持久化代码暂作为内部基础，后续接入设备切换与现有继续按钮。

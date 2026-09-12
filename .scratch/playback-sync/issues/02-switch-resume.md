@@ -11,3 +11,7 @@ Blocked by: 01
 ## Progress
 - 2026-09-12：新增 GET /player/recent-snapshot 与 POST /player/play-recent，切换读取不自动播放，播放时重建 URL 并带快照位置。
 
+## Progress
+
+- 2026-09-12：删除独立的最近播放/播放最近进度接口，改为切换时内部同步播放上下文，复用现有播放按钮。
+- 待实现：目标 PlaylistManager 上下文注入和现有继续播放流程接入。
