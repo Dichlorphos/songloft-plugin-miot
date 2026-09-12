@@ -21,7 +21,7 @@ Status: ready-for-agent
 
 - 本文：唯一的需求、代码基线事实和待确认边界汇总。
 - `CONTEXT.md`：需求领域术语，不描述实现状态。
-- `issues/01-snapshot.md`、`issues/02-switch-resume.md`：需求拆分与验收目标；`needs-info` 表示仍有边界待澄清，`Blocked by: 01` 表示依赖关系，均不表示代码进度。
+- `issues/01-snapshot.md`、`issues/02-switch-resume.md`：需求拆分与验收目标；`ready-for-agent` 表示需求边界已确认、可以进入实现，`Blocked by: 01` 表示依赖关系，均不表示代码进度。
 - ADR-0002：当前方案及取舍；仍为提议，不表示已实现。
 - ADR-0001：被取代的历史编号，不能作为当前方案依据。
 
@@ -112,4 +112,5 @@ Status: ready-for-agent
 - 相同待播放上下文重复切换时跳过处理。
 - 用户点击现有播放/继续后消费待播放上下文，覆盖目标上下文并起播；成功后清除。
 - 目标处于任何状态时都只保存待播放上下文，用户继续时才加载。
+
 
