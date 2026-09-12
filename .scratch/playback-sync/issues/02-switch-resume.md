@@ -1,7 +1,7 @@
 # 切换设备播放上下文同步
 
 Type: task
-Status: needs-info
+Status: ready-for-agent
 Blocked by: 01
 
 ## 需求范围
@@ -25,3 +25,4 @@ Blocked by: 01
 ## 待确认需求
 
 toggle、异步竞态、用户另选歌曲、失败保留、歌曲回退、账号隔离和设备组边界已在需求文档中确定。本文仅描述需求，不记录代码进度。
+
