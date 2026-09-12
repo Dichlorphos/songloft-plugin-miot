@@ -20,3 +20,7 @@
 ## 语音控制
 
 普通语音和 AI 均区分 pause、stop、resume。pause 调用已有 PlaylistManager.pause()，保留位置并更新快照；stop 调用 PlaylistManager.stop()；resume 只使用目标 PlaylistManager 当前上下文。旧 AI 返回 stop 时保持停止兼容语义。
+
+## 实现约束
+
+切换场景不得复用会发送 URL 或触发 resumeAfterReload 的初始化路径。必须区分插件启动/热重载恢复与用户设备切换：前者保持既有自动恢复，后者只执行内存上下文加载。上下文加载和真正起播使用不同的内部操作，确保切换不会产生声音或自动切歌。
