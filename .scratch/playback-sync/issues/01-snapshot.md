@@ -1,7 +1,7 @@
 # 建立最近播放快照
 
 Type: task
-Status: ready-for-agent
+Status: needs-info
 
 ## 需求范围
 
@@ -14,4 +14,3 @@ Status: ready-for-agent
 ## 待确认需求
 
 采样时机、误差基准、stop 位置及特殊歌曲的快照规则已在需求文档中确定。本文仅描述需求，不记录代码进度。
-
