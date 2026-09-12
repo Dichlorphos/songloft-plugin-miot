@@ -1,4 +1,4 @@
-# 建立最近播放快照
+# 建立账号级最新播放快照
 
 Type: task
 Status: ready-for-agent
