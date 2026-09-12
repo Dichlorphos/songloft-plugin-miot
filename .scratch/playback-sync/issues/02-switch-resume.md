@@ -21,3 +21,5 @@ Blocked by: 01
 ## Scope decisions
 
 - 2026-09-13：确认全部细化推荐；实现目标为独立设备切换后的内存上下文同步，复用现有继续播放按钮，不新增用户入口。
+
+- 2026-09-13：确认普通语音和 AI 均拆分 pause/stop；旧 AI stop 返回保持兼容，pause 复用 PlaylistManager.pause() 并更新快照。

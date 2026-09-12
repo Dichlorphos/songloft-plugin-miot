@@ -54,3 +54,10 @@ Status: ready-for-agent
 
 - 目标设备离线时允许切换并保留上下文，真正播放时报告设备错误。
 - 设备组不参与本功能，沿用现有 GroupCoordinator 行为。
+
+### 语音控制
+
+- 普通语音和 AI 都支持 `pause`、`stop`、`resume` 三种独立动作。
+- `pause` 保留位置并写入最新快照；`stop` 清理播放上下文；`resume` 使用目标 PlaylistManager 当前上下文。
+- 旧 AI 返回 `stop` 时仍按停止处理。
+- 设备组语音操作沿用现有 GroupCoordinator 行为。
