@@ -70,20 +70,6 @@ export interface PlaylistProgress {
   updated_at: number;    // Date.now()，超出每设备条数上限时按它淘汰最久没播的歌单
 }
 
-/** 最近一次跨设备续播快照（按账号全局保存）。 */
-export interface PlaybackSnapshot {
-  accountId: string;
-  sourceDeviceId: string;
-  playlistId: number;
-  songId: number;
-  songIndex: number;
-  positionSec: number;
-  durationSec: number;
-  speed: number;
-  state: PlayState;
-  updatedAt: number;
-}
-
 /** 歌单进度表：scopeKey（'<accountId>:<deviceId>'）-> 该设备各歌单的进度 */
 export type PlaylistProgressStore = Record<string, PlaylistProgress[]>;
 

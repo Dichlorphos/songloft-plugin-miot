@@ -18,7 +18,6 @@ import type {
   AIConfig,
   PlaylistProgress,
   PlaylistProgressStore,
-  PlaybackSnapshot,
 } from '../types';
 import { DEFAULT_MEMORY_MAX_RECORDS, normalizeMemoryMaxRecords } from '../memory/types';
 import { getDefaultVoiceCommands } from '../voicecmd/defaults';
@@ -34,7 +33,6 @@ const STORAGE_KEY_AI_CONFIG = 'ai_config';
 const STORAGE_KEY_SEARCH_PROVIDERS = 'search_provider_registry';
 const STORAGE_KEY_DEVICE_GROUPS = 'device_groups';
 const STORAGE_KEY_PLAYLIST_PROGRESS = 'playlist_progress';
-const STORAGE_KEY_PLAYBACK_SNAPSHOTS = 'playback_snapshots';
 
 /** 搜索源候选注册默认搜索子路径 */
 const DEFAULT_SEARCH_PATH = '/api/search/topone';
@@ -137,29 +135,6 @@ export class ConfigManager {
   // 歌单进度表：每次切歌都要读改写，不缓存就是每首歌一次多余的 storage.get。
   // 与上面两个 key 同一套约定（缓存 in-flight Promise + 写穿透）。
   private playlistProgressCache: Promise<PlaylistProgressStore> | null = null;
-
-  async getPlaybackSnapshot(accountId: string): Promise<PlaybackSnapshot | null> {
-    if (!accountId) return null;
-    const store = await this.load<Record<string, PlaybackSnapshot>>(STORAGE_KEY_PLAYBACK_SNAPSHOTS, {});
-    const snapshot = store?.[accountId];
-    return snapshot && snapshot.accountId === accountId ? snapshot : null;
-  }
-
-  async savePlaybackSnapshot(snapshot: PlaybackSnapshot): Promise<void> {
-    if (!snapshot?.accountId || snapshot.playlistId <= 0 || snapshot.songId <= 0) return;
-    const store = await this.load<Record<string, PlaybackSnapshot>>(STORAGE_KEY_PLAYBACK_SNAPSHOTS, {});
-    store[snapshot.accountId] = snapshot;
-    await this.save(STORAGE_KEY_PLAYBACK_SNAPSHOTS, store);
-  }
-
-  async removePlaybackSnapshot(accountId: string): Promise<void> {
-    if (!accountId) return;
-    const store = await this.load<Record<string, PlaybackSnapshot>>(STORAGE_KEY_PLAYBACK_SNAPSHOTS, {});
-    if (store && Object.prototype.hasOwnProperty.call(store, accountId)) {
-      delete store[accountId];
-      await this.save(STORAGE_KEY_PLAYBACK_SNAPSHOTS, store);
-    }
-  }
 
   // ===== 通用存储读写 =====
 

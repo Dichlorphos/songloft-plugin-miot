@@ -19,7 +19,7 @@ import { MemoryService } from './memory';
 import { registerAccountHandlers } from './handlers/account';
 import { registerAuthHandlers } from './handlers/auth';
 import { registerDeviceHandlers } from './handlers/device';
-import { registerPlaylistHandlers, initPlaybackSync } from './handlers/playlist';
+import { registerPlaylistHandlers } from './handlers/playlist';
 import { registerConfigHandlers } from './handlers/config';
 import { registerConversationHandlers } from './handlers/conversation';
 import { registerScheduleHandlers } from './handlers/schedule';
@@ -91,7 +91,6 @@ async function onInit(): Promise<void> {
   // 加载分组快照，使 PlaylistManagerMap 能同步把分组设备解析到共享 manager（多房间共用一套播放列表）
   await playlistManagerMap.refreshGroups();
   memoryService = new MemoryService();
-  initPlaybackSync(configManager);
 
   // 注入状态推送依赖（WebSocket 订阅端点 /status/ws 使用）
   initStatusStream(playlistManagerMap, minaService);
