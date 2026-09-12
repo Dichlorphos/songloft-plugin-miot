@@ -800,6 +800,31 @@ export function registerPlaylistHandlers(
     }
   });
 
+  router.get('/player/recent-snapshot', async (req: HTTPRequest) => {
+    const query = parseQuery(req.url || '');
+    if (!query.account_id) return jsonResponse({ success: false, error: 'account_id is required' });
+    const snapshot = await playbackSyncService?.get(query.account_id);
+    return jsonResponse({ success: true, data: snapshot || null });
+  });
+
+  router.post('/player/play-recent', async (req: HTTPRequest) => {
+    try {
+      const body = parseBody(req);
+      const { account_id, device_id } = body;
+      if (!account_id || !device_id) return jsonResponse({ success: false, error: 'account_id and device_id are required' });
+      const snapshot = await playbackSyncService?.get(account_id);
+      if (!snapshot) return jsonResponse({ success: false, error: 'no recent playback snapshot' });
+      const manager = await playlistManagerMap.getOrCreate(account_id, device_id);
+      const ok = await manager.playPlaylistFromSong(snapshot.playlistId, snapshot.songId, '');
+      if (!ok) return jsonResponse({ success: false, error: 'failed to restore recent playback' });
+      const replayed = await manager.replayCurrent(snapshot.positionSec);
+      if (!replayed) return jsonResponse({ success: false, error: 'failed to seek recent playback' });
+      return jsonResponse({ success: true, data: manager.getStatus() });
+    } catch (e) {
+      return jsonResponse({ success: false, error: String(e) });
+    }
+  });
+
   // GET /player/favorite/status - 查询歌曲是否已收藏
   router.get('/player/favorite/status', async (req: HTTPRequest) => {
     try {
