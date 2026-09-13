@@ -18,6 +18,7 @@ Status: ready-for-agent
 - 符合范围的播放至少一台目标设备成功后写入快照；快照存储失败不影响核心播放控制。
 - 快照按账号保存一条；不同独立目标设备分别保留待播放上下文，严格按 `account_id` 隔离。
 - 同一 `account_id + target_device_id` 只保留最新待播放上下文；新 revision 覆盖旧上下文，旧异步任务不得回写。
+- 待播放上下文保存快照的完整不可变副本，并附带 `source_revision`、`target_device_id`、`created_at` 和 `expires_at`；后续源快照变化不改写已保存的目标内容。
 - 快照包含账号、`content_type`、`song_id`、`playlist_id`、`radio_id`、索引、位置、`position_available`、倍速、播放模式、状态、`source_device`、更新时间、账号内单调递增的整数 `revision`、诊断标题/歌手和整数 `schema_version`。`source_device` 结构固定为 `{ account_id, device_id }`，不保存设备名称。
 - `playing` 在切换请求开始时采样源设备物理位置；采样失败保留旧快照。恢复使用固定采样位置，不额外外推，误差相对采样时刻不超过 5 秒。
 - pause 保存暂停位置；stop 保存停止前位置并标记 `stopped`。stopped 不自动起播，用户明确继续后仍可恢复。
@@ -25,6 +26,7 @@ Status: ready-for-agent
 - 快照写入按账号串行，并以账号内单调 `revision` 拒绝旧写入；`updated_at` 仅用于时间诊断。删除账号时删除快照，新账号标识不继承；不迁移试做存储数据。
 - 播放成功后立即写入基础快照；暂停、停止或切换请求开始时更新状态与位置。切换请求开始时仅采样源设备物理位置并写入当前快照；若尚无有效快照，本次切换不创建快照，目标设备保留原待播放上下文。
 - 首次成功播放无法取得位置时仍写入快照，位置记为 `0` 并将 `position_available` 设为 `false`；已有快照采样失败时保留旧位置与旧快照时间，不创建新版本，也不清除目标有效待播放上下文。
+- 设备组使用共享播放管理器，但不产生跨设备同步快照；只有独立设备的符合范围播放才更新账号级快照。
 
 ## 设备切换与待播放上下文
 
@@ -52,12 +54,16 @@ Status: ready-for-agent
 `schema_version`、`revision` 为整数，缺失或未知 schema 无效；`position_available` 为布尔值；`content_type` 只能是 `playlist` 或 `radio`。`playlist` 快照必须有 `playlist_id` 且 `radio_id` 为 `null`；`radio` 快照必须有 `radio_id` 且 `playlist_id` 为 `null`。`song_id` 是歌曲身份匹配依据，未命中时采用上文回退规则；标题和歌手仅用于诊断。不读取试做版本的存储键或数据。
 - 同步数据只使用专用存储键 `playback_sync_v1`，信封结构为 `{ schema_version: 1, snapshots, pending }`；`snapshots` 按账号保存一条，`pending` 按账号和目标设备保存一条。账号删除时同时删除该账号的数据，后续新账号 revision 从 `1` 开始。
 - 下发结果使用 `succeeded`、`failed`、`unknown` 三值；`unknown` 对外报告为 `success: false`、`outcome: 'unknown'`，不回滚设备、不自动重播、不清除待播放上下文。
+- 所有由插件主动改变 `PlaylistManager` 状态的网页、普通语音、AI、定时任务、睡眠定时器和内部自动停止路径都必须更新快照；设备物理按键或外部应用造成的状态变化不主动写快照。暂停被设备升级为停止时按实际结果写入 `stopped`。
+- 设备选择接口始终返回 `success: true`，同步在后台执行；`toggle`、明确 `resume` 和实际播放接口返回 `outcome`。`radio_id` 是播放服务提供的非空不透明字符串，恢复时原样传回同一播放服务，无法解析则保留目标原上下文并报告失败。
 
 ## 验收
 
 纯逻辑测试使用独立内存存储和 mock 宿主 API，覆盖有效期、隔离、去重、revision、回退和状态；宿主集成测试使用真实宿主验证存储、歌单、设备状态和播放调用。集成验收须检查切换不发控制命令、不覆盖活动上下文，继续才发 URL，成功清除、失败保留，以及设备组跳过。夹具不得写入真实用户存储。需求整理阶段不添加业务测试；任务 01、02 进入实现阶段后，必须补充覆盖验收场景的纯逻辑及集成测试。
 
 真机验收覆盖独立设备、设备组、目标播放中切换、快速切换、弱网/离线/unknown/超时、歌单或歌曲变化、重启和过期、特殊歌曲及旧 AI `stop`。
+
+纯逻辑测试优先使用 Node 内置 `node:test` 和独立内存 fake，避免引入重量级测试框架；前端合同测试必须支持从仓库根目录或任意工作目录运行。
 
 ## 文档职责
 
