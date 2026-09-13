@@ -18,7 +18,7 @@ Status: ready-for-agent
 - 符合范围的播放至少一台目标设备成功后写入快照；快照存储失败不影响核心播放控制。
 - 快照按账号保存一条；不同独立目标设备分别保留待播放上下文，严格按 `account_id` 隔离。
 - 同一 `account_id + target_device_id` 只保留最新待播放上下文；新 revision 覆盖旧上下文，旧异步任务不得回写。
-- 快照包含账号、`song_id`、`playlist_id`、索引、位置、`position_available`、倍速、播放模式、状态、来源设备、更新时间、账号内单调递增的整数 `revision`、诊断标题/歌手和整数 `schema_version`。
+- 快照包含账号、`content_type`、`song_id`、`playlist_id`、`radio_id`、索引、位置、`position_available`、倍速、播放模式、状态、`source_device`、更新时间、账号内单调递增的整数 `revision`、诊断标题/歌手和整数 `schema_version`。`source_device` 结构固定为 `{ account_id, device_id }`，不保存设备名称。
 - `playing` 在切换请求开始时采样源设备物理位置；采样失败保留旧快照。恢复使用固定采样位置，不额外外推，误差相对采样时刻不超过 5 秒。
 - pause 保存暂停位置；stop 保存停止前位置并标记 `stopped`。stopped 不自动起播，用户明确继续后仍可恢复。
 - 快照和各目标待播放上下文跨插件重启保留，有效期为 30 分钟；无快照、过期、无效 schema 或同步保存失败时保留目标原上下文。源设备离线、unknown、超时或存储失败不清除有效记录，仍可使用未过期快照及其固定位置。
@@ -40,7 +40,7 @@ Status: ready-for-agent
 - 快照超过 30 分钟后，若源设备仍在播放符合范围的内容且本次采样成功，切换请求可以创建新 revision；采样失败则保留旧记录，目标设备保持原上下文。
 - 加载、URL 生成或推流在下发前失败时保持目标不变；下发后失败、超时或结果未知统一视为结果不确定，保留原本地记录和待播放上下文，沿用现有核验逻辑并报告失败，不自动重播旧歌曲。
 - 歌曲恢复按 ID、索引、首曲回退；歌单不存在或为空时返回错误并保留目标原上下文。只有命中原 ID 才恢复位置，回退到其他歌曲从 0 秒开始，保留倍速和播放模式。
-- 电台纳入快照但位置固定为 0；未知时长沿用快照位置，seek 精度由播放服务决定；接近曲尾遵循现有安全位置规则。上述情况按降级行为验收，不套用精确位置误差要求。
+- 电台纳入快照，`content_type` 为 `radio`、`radio_id` 必填、`playlist_id` 为 `null`，位置固定为 0；正式歌单歌曲使用 `content_type` 为 `playlist`、`playlist_id` 必填、`radio_id` 为 `null`。未知时长沿用快照位置，seek 精度由播放服务决定；接近曲尾遵循现有安全位置规则。上述情况按降级行为验收，不套用精确位置误差要求。
 - 设备选择本身成功后，即使后台同步失败接口仍返回成功；同步错误由日志和后续继续操作报告。
 
 ## 语音行为
@@ -49,7 +49,9 @@ Status: ready-for-agent
 
 ## 数据契约
 
-`schema_version`、`revision` 为整数，缺失或未知 schema 无效；`position_available` 为布尔值。`song_id` 是歌曲身份匹配依据，未命中时采用上文回退规则；标题和歌手仅用于诊断。`playlist_id` 必填，不能跨全库搜索歌曲。不读取试做版本的存储键或数据。
+`schema_version`、`revision` 为整数，缺失或未知 schema 无效；`position_available` 为布尔值；`content_type` 只能是 `playlist` 或 `radio`。`playlist` 快照必须有 `playlist_id` 且 `radio_id` 为 `null`；`radio` 快照必须有 `radio_id` 且 `playlist_id` 为 `null`。`song_id` 是歌曲身份匹配依据，未命中时采用上文回退规则；标题和歌手仅用于诊断。不读取试做版本的存储键或数据。
+- 同步数据只使用专用存储键 `playback_sync_v1`，信封结构为 `{ schema_version: 1, snapshots, pending }`；`snapshots` 按账号保存一条，`pending` 按账号和目标设备保存一条。账号删除时同时删除该账号的数据，后续新账号 revision 从 `1` 开始。
+- 下发结果使用 `succeeded`、`failed`、`unknown` 三值；`unknown` 对外报告为 `success: false`、`outcome: 'unknown'`，不回滚设备、不自动重播、不清除待播放上下文。
 
 ## 验收
 
