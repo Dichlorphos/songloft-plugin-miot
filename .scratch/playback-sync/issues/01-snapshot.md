@@ -13,3 +13,4 @@ Status: ready-for-agent
 - 2026-09-13：同一账号与目标设备只保留最新待播放上下文；账号删除时清理快照、待播放上下文和 revision 计数。
 - 2026-09-13：已确认 `source_device` 使用 `{ account_id, device_id }`；电台使用 `content_type=radio` 与 `radio_id`，正式歌单使用 `content_type=playlist` 与 `playlist_id`；同步数据使用 `playback_sync_v1` 专用信封。
 - 2026-09-13：已确认待播放上下文保存完整不可变副本；设备组播放不更新跨设备快照；所有插件主动状态变更统一采集，暂停升级停止时按 `stopped` 保存。
+- 2026-09-13：已确认自动切歌成功更新快照，失败保留上一条；坏数据按单条忽略，位置采样超时阈值为 2 秒。
