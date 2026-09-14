@@ -128,7 +128,7 @@ export async function runMemoryV2SelfTest(): Promise<MemoryV2SelfTestResult> {
   check('v3_alias_delete_rebuilds_index', v3Service.findByQuery('再听一遍晴天') === null);
   await v3Service.deleteEntity('song:id:101');
   check('v3_entity_delete_rebuilds_index', v3Service.count() === 0 && v3Service.getIndexStats().entities === 0);
-  check('v3_max_records_clamped', normalizeMemoryMaxRecords(1000) === 500);
+  check('v3_max_records_clamped', normalizeMemoryMaxRecords(10000) === 5000 && normalizeMemoryMaxRecords(1000) === 1000);
 
   const duplicated = [
     record('later-1', '播放刘若英后来', '后来', '刘若英', 201),
@@ -176,6 +176,18 @@ export async function runMemoryV2SelfTest(): Promise<MemoryV2SelfTestResult> {
   const evictionService = new MemoryService(new InMemoryAdapter(evictionRecords), 10);
   await evictionService.init();
   check('eviction_rebuilds_indexes', evictionService.count() === 10 && evictionService.getIndexStats().records === 10);
+
+  // 手动别名不计入上限、也不被淘汰（songloft-org/songloft#459）
+  const manualService = new MemoryService(new InMemoryAdapter(), 10);
+  await manualService.init();
+  await manualService.recordSuccess({ query: '播放晴天', type: 'play_song', songName: '晴天', artist: '周杰伦', songId: 101 });
+  const manualAlias = await manualService.addManualAlias('song:id:101', '红莲的弓矢');
+  check('manual_alias_added', manualAlias.ok && manualService.findByQuery('红莲的弓矢')?.manualAlias === true);
+  for (let i = 0; i < 15; i++) {
+    await manualService.recordSuccess({ query: `自动口令${i}`, type: 'play_song', songName: `自动歌曲${i}`, artist: '自动歌手', songId: 200 + i });
+  }
+  const autoCount = manualService.list().filter(item => item.manualAlias !== true).length;
+  check('manual_alias_exempt_from_limit', manualService.findByQuery('红莲的弓矢')?.manualAlias === true && autoCount === 10);
 
   const failedAdapter = new InMemoryAdapter([sunny]);
   const failedService = new MemoryService(failedAdapter);
