@@ -12,6 +12,7 @@ import type { MemoryService } from '../memory';
 import { setHostBaseUrl, callHostAPI } from '../utils/http';
 import { setPollDebug } from '../utils/debug';
 import type { SearchPriority } from '../types';
+import { DEFAULT_MUSIC_API_MODELS } from '../mina/constants';
 
 const SEARCH_PRIORITIES: SearchPriority[] = ['parallel', 'local_first', 'external_first'];
 
@@ -103,7 +104,8 @@ export function registerConfigHandlers(
           external_search_timeout: config.external_search_timeout ?? 6,
           external_search_no_import: !!config.external_search_no_import,
           search_priority: normalizeSearchPriority(config.search_priority),
-          extra_music_api_models: config.extra_music_api_models || [],
+          music_api_model_disabled: config.music_api_model_disabled || [],
+          music_api_model_defaults: [...DEFAULT_MUSIC_API_MODELS],
           indicator_light_enabled: !!config.indicator_light_enabled,
           interrupt_tts_hint_enabled: !!config.interrupt_tts_hint_enabled,
           interrupt_tts_hint_text: config.interrupt_tts_hint_text || '正在搜索，请稍候',
@@ -331,10 +333,10 @@ export function registerConfigHandlers(
         config.max_song_index = Math.max(1000, Math.min(100000, Number(body.max_song_index) || 10000));
       }
 
-      // 更新 extra_music_api_models
-      if (body.extra_music_api_models !== undefined) {
-        config.extra_music_api_models = Array.isArray(body.extra_music_api_models)
-          ? body.extra_music_api_models
+      // 更新 music_api_model_disabled（显式禁用 Music API 的型号清单）
+      if (body.music_api_model_disabled !== undefined) {
+        config.music_api_model_disabled = Array.isArray(body.music_api_model_disabled)
+          ? body.music_api_model_disabled
               .filter((m: any) => typeof m === 'string' && m.trim())
               .map((m: string) => m.trim().toUpperCase())
           : [];

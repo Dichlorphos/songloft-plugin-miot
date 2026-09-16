@@ -62,30 +62,31 @@ export type LoginStateType = typeof LoginState[keyof typeof LoginState];
 export const GET_ASK_BY_MINA: string[] = ['M01'];
 
 /**
- * 需要使用 PlayByMusicURL（player_play_music）接口的设备型号
- * 这些设备不支持标准的 player_play_url 方法
+ * 默认走 PlayByMusicURL（player_play_music）接口的设备型号。
+ * 用户可在配置中把某个型号加入 music_api_model_disabled 让它改走 player_play_url，
+ * 覆盖此默认（部分型号 ROM 更新后其实两种接口都能播，Music API 反而更脆弱）。
  */
-export const NEED_USE_PLAY_MUSIC_API: Record<string, boolean> = {
-  'X08C': true,
-  'X08E': true,
-  'X8F': true,
-  'X4B': true,
-  'LX05': true,
-  'OH11': true,
-  'OH2': true,
-  'OH2P': true,
-  'X6A': true,
-  'LX04': true,
-  'L05B': true,
-  'L05C': true,
-  'LX06': true,
-  'L06A': true,
-  'X08A': true,
-  'X10A': true,
-  'L15A': true,
-  'L16A': true,
-  'L17A': true,
-};
+export const DEFAULT_MUSIC_API_MODELS: readonly string[] = [
+  'X08C',
+  'X08E',
+  'X8F',
+  'X4B',
+  'LX05',
+  'OH11',
+  'OH2',
+  'OH2P',
+  'X6A',
+  'LX04',
+  'L05B',
+  'L05C',
+  'LX06',
+  'L06A',
+  'X08A',
+  'X10A',
+  'L15A',
+  'L16A',
+  'L17A',
+];
 
 /**
  * 支持通过 MIoT action 播放 TTS 的设备型号。
@@ -105,12 +106,11 @@ export function shouldUseMinaForAsk(hardware: string): boolean {
 
 /**
  * 判断指定硬件型号是否需要使用 player_play_music API
- * @param extraModels - 用户自定义的额外型号列表（补充内置白名单）
+ * @param disabledModels - 用户显式禁用 Music API 的型号列表（优先于默认白名单）
  */
-export function needUsePlayMusicAPI(hardware: string, extraModels?: string[]): boolean {
-  if (NEED_USE_PLAY_MUSIC_API[hardware] === true) return true;
-  if (extraModels && extraModels.includes(hardware)) return true;
-  return false;
+export function needUsePlayMusicAPI(hardware: string, disabledModels?: string[]): boolean {
+  if (disabledModels && disabledModels.includes(hardware)) return false;
+  return DEFAULT_MUSIC_API_MODELS.includes(hardware);
 }
 
 /**
