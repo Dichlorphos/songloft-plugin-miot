@@ -19,6 +19,7 @@ import {
   loadSearchProviders,
   loadVoiceData,
   loadAiModels,
+  managedDevices,
   messageOf,
   notify,
   playlistLabel,
@@ -721,8 +722,11 @@ async function deleteMemoryRecord(id?: string): Promise<void> {
         <div class="field setting-field-control"><label class="field-label">调试日志</label><SlSwitch :model-value="state.config.debug_log_enabled" @update:model-value="setSwitch('debug_log_enabled', $event)" /></div>
       </div>
       <div v-if="state.config.conversation_monitor_enabled" class="status-panel status-panel-inset">
-        <div class="status-chips"><span class="chip chip-success">{{ conversationSocket ? 'WebSocket 已连接' : '轮询回落中' }}</span><span class="chip">{{ state.conversationMessages.length }} 条最近记录</span></div>
+        <div class="status-chips"><span class="chip chip-success">{{ conversationSocket ? 'WebSocket 已连接' : '轮询回落中' }}</span><span class="chip" :class="managedDevices.length ? 'chip-success' : 'chip-warning'">{{ managedDevices.length }} 台受管理设备</span><span class="chip">{{ state.conversationMessages.length }} 条最近记录</span></div>
       </div>
+      <!-- 「开关打开但没勾任何设备」是最容易踩的坑：口令测试正常但对话监听永远拿不到消息
+           （songloft-org/songloft-plugin-miot#104）——只轮询 managed 设备，未勾选就整台都不进池 -->
+      <div v-if="state.config.conversation_monitor_enabled && !managedDevices.length" class="dependency-hint"><SlIcon name="warning" :size="18" /><span>尚未勾选任何受管理设备，对话监听不会工作。请到"设备设置"勾选要监听的音箱。</span></div>
       <div class="field-actions"><SlButton variant="text" label="刷新记录" icon="refresh" @click="refreshConversation" /></div>
     </div>
     <div class="form-body">

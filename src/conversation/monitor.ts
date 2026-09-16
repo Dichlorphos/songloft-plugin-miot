@@ -140,7 +140,13 @@ export class ConversationMonitor {
       for (const dm of this.devices.values()) {
         dm.isRunning = true;
       }
-      songloft.log.info(`[ConversationMonitor] Started, devices=${this.devices.size} callbacks=${this.callbacks.size} interval=${intervalSec}s`);
+      // devices=0 是典型的踩坑现场（开关打开但没在设备设置勾选任何音箱），INFO 混在启动噪声里
+      // 用户导日志时几乎注意不到，升为 WARN 并给出下一步（songloft-org/songloft-plugin-miot#104）
+      if (this.devices.size === 0) {
+        songloft.log.warn(`[ConversationMonitor] Started with 0 managed devices — 请到"设备设置"勾选要监听的音箱，否则对话监听不会工作 (callbacks=${this.callbacks.size} interval=${intervalSec}s)`);
+      } else {
+        songloft.log.info(`[ConversationMonitor] Started, devices=${this.devices.size} callbacks=${this.callbacks.size} interval=${intervalSec}s`);
+      }
 
       // 先同步跑一轮把基线建起来，再装定时器。
       // 基线只能由首轮 poll 从服务端返回值建立；若等到第一个 tick（间隔可配到 30s），
