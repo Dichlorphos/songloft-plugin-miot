@@ -21,7 +21,7 @@ export interface MiotConfig {
   suggested_addresses: string[];
   conversation_monitor_enabled: boolean;
   conversation_poll_interval: number;
-  conversation_poll_debug: boolean;
+  debug_log_enabled: boolean;
   voice_command_enabled: boolean;
   voice_memory_enabled: boolean;
   voice_memory_max_records: number;

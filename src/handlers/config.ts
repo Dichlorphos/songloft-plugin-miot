@@ -10,7 +10,7 @@ import { VoiceEngine } from '../voicecmd/engine';
 import { normalizeMemoryMaxRecords } from '../memory';
 import type { MemoryService } from '../memory';
 import { setHostBaseUrl, callHostAPI } from '../utils/http';
-import { setPollDebug } from '../utils/debug';
+import { setDebugLog } from '../utils/debug';
 import type { SearchPriority } from '../types';
 import { DEFAULT_MUSIC_API_MODELS } from '../mina/constants';
 
@@ -115,7 +115,7 @@ export function registerConfigHandlers(
           play_announcement_delay: config.play_announcement_delay ?? 3,
           play_announcement_scope: config.play_announcement_scope || 'voice',
           conversation_poll_interval: config.conversation_poll_interval ?? 1,
-          conversation_poll_debug: !!config.conversation_poll_debug,
+          debug_log_enabled: !!config.debug_log_enabled,
           smart_resume_timeout: config.smart_resume_timeout ?? 30,
           max_song_index: config.max_song_index ?? 10000,
           server_host_status: getServerHostStatus(config.server_host),
@@ -317,10 +317,10 @@ export function registerConfigHandlers(
         }
       }
 
-      // 更新 conversation_poll_debug（同步到 debug 模块的缓存，热路径靠它门控日志）
-      if (body.conversation_poll_debug !== undefined) {
-        config.conversation_poll_debug = !!body.conversation_poll_debug;
-        setPollDebug(config.conversation_poll_debug);
+      // 更新 debug_log_enabled（同步到 debug 模块的缓存，热路径靠它门控日志）
+      if (body.debug_log_enabled !== undefined) {
+        config.debug_log_enabled = !!body.debug_log_enabled;
+        setDebugLog(config.debug_log_enabled);
       }
 
       // 更新 smart_resume_timeout

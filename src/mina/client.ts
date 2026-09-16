@@ -5,7 +5,7 @@
 import { CookieJar } from '../utils/cookie';
 import { fetchWithRedirects } from '../utils/http';
 import { generateDeviceId } from '../utils/crypto';
-import { isPollDebug } from '../utils/debug';
+import { isDebugLog } from '../utils/debug';
 import {
   MINA_API_BASE_URL,
   MINA_SID,
@@ -140,6 +140,10 @@ export class MinaHTTPClient {
    */
   async playByUrl(deviceId: string, url: string, hardware = '', disabledModels?: string[], keepLight = false, customAudioId?: string, lyricsMode?: { enabled: boolean; songName?: string; metadata?: PlayMetadata }): Promise<boolean> {
     const useMusicAPI = hardware ? needUsePlayMusicAPI(hardware, disabledModels) : false;
+    if (isDebugLog()) {
+      const disabled = Array.isArray(disabledModels) ? disabledModels.join(',') : '';
+      songloft.log.info(`[MinaClient] playByUrl device=${deviceId} hardware=${hardware} useMusicAPI=${useMusicAPI} keepLight=${keepLight} lyricsMode=${!!lyricsMode?.enabled} disabledModels=[${disabled}] url=${this.redactAccessToken(url).slice(0, 160)}`);
+    }
     if (useMusicAPI) {
       const fallbackAudioId = customAudioId || DEFAULT_MUSIC_AUDIO_ID;
       if (lyricsMode?.enabled) {
@@ -281,6 +285,9 @@ export class MinaHTTPClient {
    * 使用 player_play_url 播放 URL
    */
   async playURL(deviceId: string, url: string, keepLight = false): Promise<boolean> {
+    if (isDebugLog()) {
+      songloft.log.info(`[MinaClient] play-url stream device=${deviceId} keepLight=${keepLight} url=${this.redactAccessToken(url).slice(0, 160)}`);
+    }
     const message = { url, type: keepLight ? 1 : 2, media: 'app_ios' };
     const result = await this.ubusRequest(deviceId, 'player_play_url', 'mediaplayer', message, 'play-url');
     return this.isDeviceResultOK(result, 'player_play_url');
@@ -292,6 +299,9 @@ export class MinaHTTPClient {
   async playByMusicURL(deviceId: string, audioUrl: string, keepLight = false, customAudioId?: string, logLabel = 'play-music'): Promise<boolean> {
     // 默认封面
     const audioId = customAudioId || DEFAULT_MUSIC_AUDIO_ID;
+    if (isDebugLog()) {
+      songloft.log.info(`[MinaClient] ${logLabel} stream device=${deviceId} keepLight=${keepLight} audioId=${audioId} url=${this.redactAccessToken(audioUrl).slice(0, 160)}`);
+    }
 
     const music = {
       payload: {
@@ -324,7 +334,31 @@ export class MinaHTTPClient {
     };
 
     const result = await this.ubusRequest(deviceId, 'player_play_music', 'mediaplayer', message, logLabel);
-    return this.isDeviceResultOK(result, 'player_play_music');
+    const ok = this.isDeviceResultOK(result, 'player_play_music');
+    // 诊断 songloft-org/songloft#453：ubus 云端汇报 success，但音箱仍无声。
+    // 推送 2s 后异步回读一次真实播放状态，暴露「云端受理但设备未拉流」的静默失败。
+    // fire-and-forget：不阻塞返回、异常吞掉，仅打日志。
+    if (ok && isDebugLog()) {
+      setTimeout(() => {
+        this.getPlayerStatus(deviceId).then(status => {
+          const data = (status?.data ?? {}) as Record<string, unknown>;
+          const info = typeof data.info === 'string' ? data.info : '';
+          songloft.log.info(`[MinaClient] ${logLabel} readback+2s device=${deviceId} code=${status?.code ?? 'null'} info=${info.substring(0, 200)}`);
+        }).catch(e => {
+          songloft.log.warn(`[MinaClient] ${logLabel} readback+2s failed device=${deviceId}: ${String(e)}`);
+        });
+      }, 2000);
+    }
+    return ok;
+  }
+
+  /**
+   * 日志脱敏：把 URL 里的 access_token 值遮成 <redacted>。
+   * 播放路径日志会打完整 URL 便于排障，但不能把 token 泄漏到日志文件。
+   */
+  private redactAccessToken(url: string): string {
+    if (!url) return url;
+    return url.replace(/([?&]access_token=)[^&\s]+/g, '$1<redacted>');
   }
 
   /**
@@ -518,27 +552,27 @@ export class MinaHTTPClient {
    * @param limit - 记录数量限制（默认2）
    */
   async getLatestAskFromXiaoai(deviceId: string, hardware: string, limit = 2): Promise<AskMessage[] | null> {
-    if (isPollDebug()) songloft.log.info(`[ConversationMonitor] getLatestAskFromXiaoai deviceId=${deviceId} hardware=${hardware} limit=${limit} useMinaForAsk=${shouldUseMinaForAsk(hardware)}`);
+    if (isDebugLog()) songloft.log.info(`[ConversationMonitor] getLatestAskFromXiaoai deviceId=${deviceId} hardware=${hardware} limit=${limit} useMinaForAsk=${shouldUseMinaForAsk(hardware)}`);
     // 部分设备需要通过 ubus 方式获取
     if (shouldUseMinaForAsk(hardware)) {
       const ubusResult = await this.getLatestAskByUbus(deviceId);
-      if (isPollDebug()) songloft.log.info(`[ConversationMonitor] getLatestAskByUbus result: ${ubusResult ? ubusResult.length : 0} messages`);
+      if (isDebugLog()) songloft.log.info(`[ConversationMonitor] getLatestAskByUbus result: ${ubusResult ? ubusResult.length : 0} messages`);
       return ubusResult;
     }
 
     // 与 Go 版一致：在循环外部生成时间戳，重试时复用相同 URL
     const timestamp = Date.now();
     const apiUrl = formatLatestAskUrl(hardware, timestamp, limit);
-    if (isPollDebug()) songloft.log.info(`[ConversationMonitor] getLatestAskFromXiaoai apiUrl=${apiUrl}`);
+    if (isDebugLog()) songloft.log.info(`[ConversationMonitor] getLatestAskFromXiaoai apiUrl=${apiUrl}`);
 
     // 大多数设备通过 xiaoai API 获取，带3次重试
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       const messages = await this.doGetLatestAskFromXiaoai(deviceId, apiUrl);
       if (messages !== null) {
-        if (isPollDebug()) songloft.log.info(`[ConversationMonitor] getLatestAskFromXiaoai attempt=${attempt} success, ${messages.length} messages`);
+        if (isDebugLog()) songloft.log.info(`[ConversationMonitor] getLatestAskFromXiaoai attempt=${attempt} success, ${messages.length} messages`);
         return messages;
       }
-      if (isPollDebug()) songloft.log.info(`[ConversationMonitor] getLatestAskFromXiaoai attempt=${attempt} returned null, retrying...`);
+      if (isDebugLog()) songloft.log.info(`[ConversationMonitor] getLatestAskFromXiaoai attempt=${attempt} returned null, retrying...`);
     }
     songloft.log.info(`[ConversationMonitor] getLatestAskFromXiaoai all ${MAX_RETRIES} attempts failed`);
     // 返回 null 而非 []：让调用方知道这是「取不到」，不是「没有记录」
@@ -869,10 +903,10 @@ export class MinaHTTPClient {
       return null;
     }
 
-    if (isPollDebug()) songloft.log.info(`[ConversationMonitor] doGetLatestAskFromXiaoai status=${response.status}`);
+    if (isDebugLog()) songloft.log.info(`[ConversationMonitor] doGetLatestAskFromXiaoai status=${response.status}`);
 
     if (response.status === 401) {
-      if (isPollDebug()) songloft.log.info(`[ConversationMonitor] doGetLatestAskFromXiaoai 401 token expired`);
+      if (isDebugLog()) songloft.log.info(`[ConversationMonitor] doGetLatestAskFromXiaoai 401 token expired`);
       if (this.onTokenExpired) {
         await this.onTokenExpired();
       }
@@ -887,20 +921,20 @@ export class MinaHTTPClient {
     try {
       const text = response.text() as string;
       // 打印原始响应体（最多 1000 字符）
-      if (isPollDebug()) songloft.log.info(`[ConversationMonitor] doGetLatestAskFromXiaoai raw response (${text.length} chars): ${text.substring(0, 1000)}`);
+      if (isDebugLog()) songloft.log.info(`[ConversationMonitor] doGetLatestAskFromXiaoai raw response (${text.length} chars): ${text.substring(0, 1000)}`);
 
       const result = JSON.parse(text) as Record<string, unknown>;
 
       // data 字段是一个 JSON 字符串
       const dataStr = result['data'] as string;
       if (!dataStr) {
-        if (isPollDebug()) songloft.log.info(`[ConversationMonitor] doGetLatestAskFromXiaoai data field is empty/null`);
+        if (isDebugLog()) songloft.log.info(`[ConversationMonitor] doGetLatestAskFromXiaoai data field is empty/null`);
         return [];
       }
 
       const dataObj = JSON.parse(dataStr) as ConversationData;
       if (!dataObj.records || dataObj.records.length === 0) {
-        if (isPollDebug()) songloft.log.info(`[ConversationMonitor] doGetLatestAskFromXiaoai records empty or missing`);
+        if (isDebugLog()) songloft.log.info(`[ConversationMonitor] doGetLatestAskFromXiaoai records empty or missing`);
         return [];
       }
 
@@ -919,7 +953,7 @@ export class MinaHTTPClient {
           },
         };
       });
-      if (isPollDebug()) songloft.log.info(`[ConversationMonitor] doGetLatestAskFromXiaoai parsed ${messages.length} messages`);
+      if (isDebugLog()) songloft.log.info(`[ConversationMonitor] doGetLatestAskFromXiaoai parsed ${messages.length} messages`);
       return messages;
     } catch (e) {
       songloft.log.warn(`[ConversationMonitor] doGetLatestAskFromXiaoai parse error: ${String(e)}`);
