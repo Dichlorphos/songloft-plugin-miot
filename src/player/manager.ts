@@ -659,6 +659,45 @@ export class PlaylistManager {
     return this.songs;
   }
 
+  /**
+   * 从内存队列里移除一首歌，把 currentIndex 和随机模式记录调整过来。
+   *
+   * 只改内存不发设备指令：调用方（POST /player/song/remove handler）负责先决定
+   * 「删的是不是正在播的那首」——若是，要先切下一首（next() 会持久化并推 URL），
+   * 再回来调本方法把它从队列删掉。这样自动切歌与队列一致性由持久化收口负责，
+   * 本方法不重复触发。
+   *
+   * pendingNextIndex 里可能指向旧下标，必须清；randomPlayed 记的是**下标**而非
+   * 歌曲 id，删掉一首后所有位于其后的下标都要减 1，否则随机模式下的"已播过"判断
+   * 会错位。
+   *
+   * 删完必须重新 persistState：调用方若刚 next() 过（删的是正播那首），持久化里存的
+   * 还是**旧队列**的下标，不重存的话热重载后 restoreFromConfig 会恢复到错一位的歌。
+   * 返回 true 表示确有一首被删。
+   */
+  async removeSongFromMemory(songId: number): Promise<boolean> {
+    const idx = this.songs.findIndex(s => s.id === songId);
+    if (idx < 0) return false;
+    this.songs.splice(idx, 1);
+    if (this.currentIndex > idx) {
+      this.currentIndex -= 1;
+    } else if (this.currentIndex === idx) {
+      this.currentIndex = Math.min(this.currentIndex, Math.max(0, this.songs.length - 1));
+    }
+    this.totalSongs = this.songs.length;
+    if (this.randomPlayed.size > 0) {
+      const remapped = new Set<number>();
+      for (const played of this.randomPlayed) {
+        if (played < idx) remapped.add(played);
+        else if (played > idx) remapped.add(played - 1);
+      }
+      this.randomPlayed = remapped;
+    }
+    this.clearPendingNextIndex();
+    await this.persistState();
+    return true;
+  }
+
   /** 返回该 manager 的固定临时歌单 ID */
   getTempId(): number {
     return this.tempId;

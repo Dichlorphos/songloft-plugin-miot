@@ -11,7 +11,7 @@ import SlIcon from '../ui/SlIcon.vue';
 import { closePage, navigation, notifyHostFavorite } from '../runtime';
 import { get, messageOf, post, query } from '../api';
 import type { SleepTimerStatus } from '../types';
-import { notify, playerCommand, seekPlayer, setPlayMode, setPlaybackSpeed, setVolume, state } from '../store';
+import { confirmAction, notify, playerCommand, seekPlayer, setPlayMode, setPlaybackSpeed, setVolume, state } from '../store';
 
 interface LyricLine { time: number; text: string }
 interface LyricPayload { lyric?: string; tlyric?: string; rlyric?: string; lxlyric?: string }
@@ -92,6 +92,46 @@ async function loadSongDetails(): Promise<void> {
     lyrics.value = [];
   }
   isFavorite.value = favoriteResult.status === 'fulfilled' && favoriteResult.value.is_favorited;
+}
+
+// 全屏播放器里的"删除当前歌曲"入口。临时歌单（id<0，语音"播放歌手X"生成的一次性队列）
+// 不落库，按下删除会没意义——这时按钮不可用。要删的是"当前正播那首"，取自 player.current_song
+// 而不是 selectedPlaylistId 对应的列表（用户可能开着另一个歌单在看）。
+const currentPlaylistId = computed(() => {
+  const id = Number(state.player.playlist_id);
+  return Number.isFinite(id) ? id : 0;
+});
+const canRemoveCurrent = computed(() => currentPlaylistId.value > 0 && !!state.player.current_song);
+async function removeCurrentSong(): Promise<void> {
+  const song = state.player.current_song;
+  const playlistId = currentPlaylistId.value;
+  if (!song || playlistId <= 0) return;
+  const result = await confirmAction(
+    '删除当前歌曲',
+    `确定从当前歌单删除《${song.title || '未知歌曲'}》吗？`,
+    '删除',
+    true,
+    { label: '同时从曲库中永久删除歌曲文件', initial: false },
+  );
+  if (!result.confirmed) return;
+  try {
+    // removeSongFromPlaylist 读的是 selectedPlaylistId，而全屏播放器里正播的那份
+    // 不一定是当前选中的歌单；这里直接调后端并接手错误提示。
+    await post('/player/song/remove', {
+      playlist_id: playlistId,
+      song_id: song.id,
+      from_library: result.checked,
+      account_id: state.currentAccountId,
+      device_id: state.currentDeviceId,
+    });
+    // 若删的正是当前所选歌单里那首，也要同步筛掉，否则列表还残留一条已消失的歌。
+    if (String(playlistId) === state.selectedPlaylistId) {
+      state.songs = state.songs.filter((item) => item.id !== song.id);
+    }
+    notify(result.checked ? '已从歌单和曲库删除' : '已从歌单删除', 'success');
+  } catch (error) {
+    notify(messageOf(error), 'error');
+  }
 }
 
 async function toggleFavorite(): Promise<void> {
@@ -400,6 +440,7 @@ watch(activeLyric, centerActiveLyric);
               @set="setSleepTimer"
               @cancel="cancelSleepTimer"
             />
+            <SlButton variant="icon" icon="delete" player-icon class="player-tool-button" title="从歌单删除" :disabled="!canRemoveCurrent" @click="removeCurrentSong" />
             <SlButton variant="icon" icon="stop" player-icon class="player-tool-button" title="停止播放" :disabled="state.playerBusy" @click="playerCommand('/player/stop')" />
           </div>
         </div>

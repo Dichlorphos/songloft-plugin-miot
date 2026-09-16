@@ -312,7 +312,7 @@ async function setCommandEnabled(index: number, enabled: boolean): Promise<void>
 }
 
 async function resetCommands(): Promise<void> {
-  if (!(await confirmAction('恢复默认口令', '当前自定义口令词会被默认配置覆盖。', '恢复默认'))) return;
+  if (!(await confirmAction('恢复默认口令', '当前自定义口令词会被默认配置覆盖。', '恢复默认')).confirmed) return;
   commandSaving.value = true;
   try {
     await saveVoiceCommands([]);
@@ -468,7 +468,7 @@ async function addHook(): Promise<void> {
 }
 
 async function removeHook(id: string): Promise<void> {
-  if (!(await confirmAction('删除 Webhook', '确定删除这个回调地址吗？', '删除', true))) return;
+  if (!(await confirmAction('删除 Webhook', '确定删除这个回调地址吗？', '删除', true)).confirmed) return;
   try { await deleteWebhook(id); } catch (error) { notify(messageOf(error), 'error'); }
 }
 
@@ -691,7 +691,7 @@ function memoryAliases(entity: MemoryEntity): Array<{ id?: string; query?: strin
 }
 
 async function deleteMemoryEntity(key: string, title: string): Promise<void> {
-  if (!(await confirmAction('删除语音记忆', `确定删除"${title}"的全部记忆吗？`, '删除', true))) return;
+  if (!(await confirmAction('删除语音记忆', `确定删除"${title}"的全部记忆吗？`, '删除', true)).confirmed) return;
   try {
     await del(`/memory/entity?canonicalKey=${encodeURIComponent(key)}`);
     await ensureMemoryLoaded(true);

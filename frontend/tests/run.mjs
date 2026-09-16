@@ -368,7 +368,7 @@ assert.match(fullscreenPlayer, /action: next \? 'add' : 'remove'/);
 assert.match(fullscreenPlayer, /isFavorite\.value = next/);
 assert.match(fullscreenPlayer, /class="player-favorite-button"/);
 assert.match(fullscreenPlayer, /class="fullscreen-tool-desktop player-favorite-button"/);
-assert.equal((fullscreenPlayer.match(/player-icon/g) || []).length, 11);
+assert.equal((fullscreenPlayer.match(/player-icon/g) || []).length, 12);
 assert.match(slButton, /playerIcon\?: boolean/);
 assert.match(slButton, /:player-icon="playerIcon"/);
 assert.match(slIcon, /favorite: 0xe25b/);
@@ -565,6 +565,50 @@ assert.match(scheduleSettings, /v-if="!isGlobalAction && !allManaged"/);
 assert.match(scheduleSettings, /if \(!global && !allManaged\.value/);
 // 列表副标题显示中文 label，不是 enable_monitor 这种原始值
 assert.match(scheduleSettings, /\{\{ actionLabel\(task\.action\) \}\}/);
+
+// 歌曲删除（songloft-org/songloft#465）：用户在音箱上听到不想的歌可以直接在插件里删，
+// 不必切回本地歌单模式。三处入口 + 后端一份收口 + 可选"从曲库永久删除"复选框。
+// ① 后端：POST /player/song/remove 收下 playlist_id / song_id / from_library 三个参数，
+//   把"从歌单去除、可选清曲库、正播那首要先切下一首"这几件事集中在一处。
+assert.match(playlistHandler, /router\.post\('\/player\/song\/remove'/);
+assert.match(playlistHandler, /const fromLibrary = body\.from_library === true/);
+assert.match(playlistHandler, /await songloft\.playlists\.removeSongs\(playlistId, \[songId\]\)/);
+assert.match(playlistHandler, /await songloft\.songs\.delete\(songId\)/);
+assert.match(playlistHandler, /await manager\.next\(\)/);
+assert.match(playlistHandler, /await manager\.removeSongFromMemory\(songId\)/);
+// 临时歌单没有持久化记录，不能对它调 removeSongs bridge
+assert.match(playlistHandler, /if \(!isTempPlaylistId\(playlistId\)\)/);
+// ② PlaylistManager 内存队列同步：currentIndex 与 randomPlayed 都要跟着调整
+assert.match(playerManager, /async removeSongFromMemory\(songId: number\): Promise<boolean>/);
+assert.match(playerManager, /this\.songs\.splice\(idx, 1\)/);
+assert.match(playerManager, /this\.clearPendingNextIndex\(\)/);
+// ③ 前端 store：确认对话框现在返回 { confirmed, checked }，为的是复选框状态一起回传
+assert.match(store, /export function confirmAction/);
+assert.match(store, /Promise<\{ confirmed: boolean; checked: boolean \}>/);
+assert.match(store, /export async function removeSongFromPlaylist/);
+assert.match(store, /'\/player\/song\/remove'/);
+assert.match(store, /from_library: !!opts\.fromLibrary/);
+// 旧签名的 `!(await confirmAction(...))` 必须全部改成读 .confirmed，否则
+// 对话框永远返回 truthy 对象，Cancel 也当成 OK
+assert.doesNotMatch(scheduleSettings, /!\(await confirmAction\([^)]*\)\)\)/);
+assert.doesNotMatch(voiceSettings, /!\(await confirmAction\([^)]*\)\)\)/);
+// ④ ConfirmDialog 渲染可选复选框；SlCheckbox 已挂上双向绑定
+const confirmDialog = read('views/ConfirmDialog.vue');
+assert.match(confirmDialog, /<SlCheckbox/);
+assert.match(confirmDialog, /state\.confirm\.checkbox\.checked/);
+// ⑤ SongRow 支持 removable + remove 事件；样式复用现有 song-actions
+assert.match(songRow, /removable\?: boolean/);
+assert.match(songRow, /remove: \[Song\]/);
+assert.match(songRow, /icon="delete" title="从歌单删除"/);
+// ⑥ MainPage 挂 remove 处理，且临时歌单（id<=0）不亮删除按钮
+assert.match(mainPage, /const songRemovable = computed/);
+assert.match(mainPage, /Number\.isFinite\(id\) && id > 0/);
+assert.match(mainPage, /:removable="songRemovable" @play="play" @remove="removeSong"/);
+assert.match(mainPage, /同时从曲库中永久删除歌曲文件/);
+// ⑦ 全屏播放器工具栏也放一个删除按钮，直接对准正播那首
+assert.match(fullscreenPlayer, /removeCurrentSong/);
+assert.match(fullscreenPlayer, /title="从歌单删除"/);
+assert.match(fullscreenPlayer, /同时从曲库中永久删除歌曲文件/);
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 assert.equal(clamp(120, 0, 100), 100);

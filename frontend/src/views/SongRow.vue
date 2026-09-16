@@ -6,8 +6,8 @@ import { state } from '../store';
 import SlButton from '../ui/SlButton.vue';
 import SlIcon from '../ui/SlIcon.vue';
 
-const props = defineProps<{ song: Song; index: number }>();
-const emit = defineEmits<{ play: [Song, number] }>();
+const props = defineProps<{ song: Song; index: number; removable?: boolean }>();
+const emit = defineEmits<{ play: [Song, number]; remove: [Song] }>();
 const coverSrc = ref('');
 let coverSlot: CoverSlot | null = null;
 let coverGeneration = 0;
@@ -134,6 +134,7 @@ onUnmounted(() => {
     </button>
     <div class="song-actions">
       <SlButton variant="icon" icon="play_arrow" title="播放此曲" @click="emit('play', song, index)" />
+      <SlButton v-if="removable" variant="icon" icon="delete" title="从歌单删除" @click="emit('remove', song)" />
     </div>
   </div>
 </template>

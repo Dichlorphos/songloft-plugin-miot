@@ -170,13 +170,13 @@ async function startQr() {
   } catch (error) { if (gen === qrGen) { qrBusy.value = false; qrStatus.value = messageOf(error); notify(qrStatus.value, 'error'); } }
 }
 async function relogin(id: string) { try { await postEnvelope('/auth/relogin', { account_id: id }); notify('重新登录成功', 'success'); await loadAccountsAndDevices(); } catch (error) { notify(messageOf(error), 'warning'); } }
-async function removeAccount(id: string) { if (await confirmAction('删除账号', `确定删除账号“${id}”吗？此操作不可撤销。`, '删除', true)) { try { await import('../../api').then(({ del }) => del(`/account?account_id=${encodeURIComponent(id)}`)); notify('账号已删除', 'success'); await loadAccountsAndDevices(); } catch (error) { notify(messageOf(error), 'error'); } } }
+async function removeAccount(id: string) { if ((await confirmAction('删除账号', `确定删除账号“${id}”吗？此操作不可撤销。`, '删除', true)).confirmed) { try { await import('../../api').then(({ del }) => del(`/account?account_id=${encodeURIComponent(id)}`)); notify('账号已删除', 'success'); await loadAccountsAndDevices(); } catch (error) { notify(messageOf(error), 'error'); } } }
 async function setManaged(accountId: string, id: string, value: boolean) { try { await toggleManaged(accountId, id, value); } catch (error) { notify(messageOf(error), 'error'); } }
 
 function openGroup(group?: DeviceGroup) { groupEditor.value = true; editGroupId.value = group?.id || ''; groupName.value = group?.name || ''; selectedMembers.value = (group?.members || []).map((member) => `${member.account_id}:${member.device_id}`); }
 function closeGroup() { groupEditor.value = false; }
 async function saveCurrentGroup() { if (!groupName.value.trim() || selectedMembers.value.length < 2) { notify('请输入分组名称并至少选择两台设备', 'warning'); return; } const members: DeviceMember[] = selectedMembers.value.map((value) => { const [account_id, device_id] = value.split(':'); return { account_id, device_id }; }); try { await saveGroup({ id: editGroupId.value || undefined, name: groupName.value.trim(), members }); closeGroup(); } catch (error) { notify(messageOf(error), 'error'); } }
-async function removeGroup(id: string) { if (await confirmAction('删除设备分组', '删除后成员会恢复为独立设备播放。', '删除', true)) { try { await deleteGroup(id); } catch (error) { notify(messageOf(error), 'error'); } } }
+async function removeGroup(id: string) { if ((await confirmAction('删除设备分组', '删除后成员会恢复为独立设备播放。', '删除', true)).confirmed) { try { await deleteGroup(id); } catch (error) { notify(messageOf(error), 'error'); } } }
 
 // 用户账号下所有设备去重后的型号（hardware 优先）。设置项以设备实际存在的型号为主，
 // 未在设备列表中出现的默认清单项以徽章形式提示。
