@@ -19,6 +19,12 @@ npm test            # pure-logic tests (src/**/*.test.ts)
 node frontend/tests/run.mjs   # frontend contract tests
 ```
 
+> Windows 上 `build` / `dev` / `validate` 经 `scripts/songloft-plugin.cjs` 调用：
+> `@songloft/plugin-builder` 用 `execFileSync('npm.cmd', ...)` 触发前端构建，而 Node 自
+> CVE-2024-27980 修复起禁止无 shell 地 spawn `.cmd`，会抛 `spawnSync npm.cmd EINVAL`
+> （降级 Node 也一样）。包装脚本先打上 `scripts/patch-win-cmd-spawn.cjs` 再转发参数，
+> 非 Windows 平台行为不变。上游修好后这两个脚本可以删除。
+
 ## Description
 
 智能音箱设备控制示例插件。本仓库仅提供与宿主 SDK 对接的脚手架代码，**不附带任何第三方设备协议实现或账号体系**，使用者需自行负责接入合规性。

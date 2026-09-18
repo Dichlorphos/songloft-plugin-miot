@@ -5,13 +5,13 @@
   "private": true,
   "scripts": {
     "prebuild": "node scripts/fetch-holidays.mjs && node scripts/build-pinyin-data.mjs",
-    "build": "songloft-plugin build",
+    "build": "node scripts/songloft-plugin.cjs build",
     "predev": "node scripts/fetch-holidays.mjs && node scripts/build-pinyin-data.mjs",
-    "dev": "songloft-plugin dev",
-    "validate": "songloft-plugin validate",
+    "dev": "node scripts/songloft-plugin.cjs dev",
+    "validate": "node scripts/songloft-plugin.cjs validate",
     "typecheck": "tsc --noEmit",
     "test": "node --test \"src/**/*.test.ts\"",
-    "publish:release": "songloft-plugin publish",
+    "publish:release": "node scripts/songloft-plugin.cjs publish",
     "fetch:holidays": "node scripts/fetch-holidays.mjs",
     "build:pinyin": "node scripts/build-pinyin-data.mjs",
     "sync:tts": "node scripts/sync-tts-commands.mjs"
