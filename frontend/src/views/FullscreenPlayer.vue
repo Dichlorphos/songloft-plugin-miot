@@ -440,7 +440,11 @@ watch(activeLyric, centerActiveLyric);
               @set="setSleepTimer"
               @cancel="cancelSleepTimer"
             />
-            <SlButton variant="icon" icon="delete" player-icon class="player-tool-button" title="从歌单删除" :disabled="!canRemoveCurrent" @click="removeCurrentSong" />
+            <!-- 唯独这个按钮不带 player-icon：material-icons-player.otf 是子集字体，
+                 只含播放器语义图标（play/pause/skip/volume/…），不含 delete 字形；
+                 强行用会 fallback 成字面文本渲染不出图标。走 Miot UI Icons 的 delete
+                 (0xE92E)，与 SongRow 的删除按钮字形一致。 -->
+            <SlButton variant="icon" icon="delete" class="player-tool-button" title="从歌单删除" :disabled="!canRemoveCurrent" @click="removeCurrentSong" />
             <SlButton variant="icon" icon="stop" player-icon class="player-tool-button" title="停止播放" :disabled="state.playerBusy" @click="playerCommand('/player/stop')" />
           </div>
         </div>
