@@ -14,6 +14,7 @@ import { AIAnalyzer } from './voicecmd/ai_analyzer';
 import { getDefaultVoiceCommands } from './voicecmd/engine';
 import { IndexingManager } from './indexing/manager';
 import { MemoryService } from './memory';
+import { getPlaybackRecorder } from './playback_sync';
 
 // 导入所有handler注册函数
 import { registerAccountHandlers } from './handlers/account';
@@ -87,6 +88,8 @@ async function onInit(): Promise<void> {
   authService = new AuthService(configManager, accountManager);
   minaService = new MinaService(accountManager, configManager);
   playlistManagerMap = new PlaylistManagerMap(minaService, configManager);
+  // 播放快照采集器：注入到播放管理器，由其状态机出口上报观测。
+  playlistManagerMap.setSnapshotRecorder(getPlaybackRecorder());
   groupCoordinator = new GroupCoordinator(playlistManagerMap, minaService, configManager);
   // 加载分组快照，使 PlaylistManagerMap 能同步把分组设备解析到共享 manager（多房间共用一套播放列表）
   await playlistManagerMap.refreshGroups();

@@ -9,6 +9,8 @@ import { MinaService } from '../service/service';
 import { URLBuilder, playbackOptionsOf, playbackOptionsFromConfig } from './url_builder';
 import { getHostBaseUrl, callHostAPI } from '../utils/http';
 import type { PlayState, PlayMode, PlayerStatus, DeviceTargetRef, DeviceGroup } from '../types';
+import type { PlaybackRecorder } from '../playback_sync/recorder';
+import { buildObservation } from '../playback_sync/observation';
 
 /** 分配临时歌单唯一负数 ID（每个设备/歌手各一个，互不冲突） */
 let nextTempPlaylistId = -1;
@@ -265,6 +267,10 @@ export class PlaylistManager {
   private targets: DeviceTargetRef[];
   private onAdvanceHook?: () => boolean;
   private announceOnSongChange: boolean = false;
+  // 快照采集器。由 PlaylistManagerMap 注入；未注入时（如单测直接 new）不采集。
+  private snapshotRecorder?: PlaybackRecorder;
+  // 停止前的位置。stop() 会把 pausedPositionSec 清零，快照要用清零前的值。
+  private lastStopPositionSec: number = 0;
 
   constructor(
     accountId: string,
@@ -288,6 +294,11 @@ export class PlaylistManager {
    */
   setOnAdvanceHook(hook: (() => boolean) | undefined): void {
     this.onAdvanceHook = hook;
+  }
+
+  /** 注入快照采集器。状态机出口据此上报观测，未注入则不采集。 */
+  setSnapshotRecorder(recorder: PlaybackRecorder | undefined): void {
+    this.snapshotRecorder = recorder;
   }
 
   setAnnounceOnSongChange(enabled: boolean): void {
@@ -501,6 +512,9 @@ export class PlaylistManager {
     // 落盘暂停位置：不写的话重载续播会拿着「暂停前那个 playing 锚点」外推，
     // 把暂停这段时长也算成已播时长（#96）
     await this.persistState();
+
+    // 状态机出口：暂停完成。设备把 pause 升级为 stop 时按实际结果写 stopped。
+    await this.captureSnapshot(this.hardStopped ? 'stopped' : 'paused');
   }
 
   /**
@@ -512,6 +526,9 @@ export class PlaylistManager {
    *   外部恢复探测等收尾动作与主动停止完全一致。
    */
   async stop(pushToDevice = true): Promise<void> {
+    // 停止前的位置要在状态与 pausedPositionSec 被清掉之前抓取，否则快照只剩 0。
+    this.lastStopPositionSec = this.state === 'paused' ? this.pausedPositionSec : this.getPosition();
+
     this.stopCheckTimer();
     this.clearVoiceSuspend();
     this.state = 'stopped';
@@ -528,6 +545,11 @@ export class PlaylistManager {
 
     // 清掉重载续播锚点：停止之后重载不该再自动出声（#96）
     await this.persistState();
+
+    // 状态机出口：停止完成。
+    // pushToDevice=false 是「设备自己停了」的外部探测路径，属于设备侧状态变化，
+    // 规范要求不主动写快照（写了会把用户可恢复的上下文覆盖成 stopped）。
+    if (pushToDevice) await this.captureSnapshot('stopped');
 
     this.startResumePoll();
   }
@@ -823,6 +845,9 @@ export class PlaylistManager {
       this.scheduleDurationProbe();
       songloft.log.info(`[PlaylistManager] Duration unknown after resume, starting device duration probe`);
     }
+
+    // 状态机出口：续播成功（硬停路径已在 playCurrent 内上报）。
+    await this.captureSnapshot('playing');
 
     return true;
   }
@@ -1308,6 +1333,9 @@ export class PlaylistManager {
     }
 
     this.prefetchNextSong();
+
+    // 状态机出口：起播成功。
+    await this.captureSnapshot('playing');
 
     return true;
   }
@@ -1881,6 +1909,8 @@ export class PlaylistManager {
       this.streamSeekOffsetSec = 0;
       this.hardStopped = true;
       songloft.log.info('[PlaylistManager] Single-play completed, pausing on current song');
+      // 状态机出口：单曲播放结束。
+      await this.captureSnapshot('paused');
       return;
     }
 
@@ -1889,8 +1919,12 @@ export class PlaylistManager {
     const nextIdx = this.reserveNextIndex();
     if (nextIdx < 0) {
       songloft.log.info('[PlaylistManager] No next song, playback complete');
+      // 先抓结束位置再清锚点：lastStopPositionSec 可能还留着上一次停止的值。
+      this.lastStopPositionSec = this.getPosition();
       this.state = 'stopped';
       this.playStartTimeMs = 0;
+      // 状态机出口：歌单播完。
+      await this.captureSnapshot('stopped');
       return;
     }
 
@@ -1928,6 +1962,8 @@ export class PlaylistManager {
     songloft.log.error('[PlaylistManager] Auto-next failed after retry, stopping');
     this.state = 'stopped';
     this.playStartTimeMs = 0;
+    // 自动切歌失败刻意不写快照：规范要求「自动切歌失败则保留上一条有效快照」。
+    // 这不是用户主动停止，写 stopped 会把上一条可恢复的上下文覆盖成停止态。
     // 张开外部恢复兜底网：下发失败可能仍是假失败（#98），而 playCurrent 的核实也有漏判的可能
     // （设备既不上报流长、位置又超出起播窗口）。轮询发现设备其实在放我们的流就重新接管切歌，
     // 否则这里就是播放的终点。stop() 一直有这一步，这条失败路径此前漏了。
@@ -1964,6 +2000,58 @@ export class PlaylistManager {
       resume_song_id: song.id,
       resume_seek_offset_sec: this.streamSeekOffsetSec,
     };
+  }
+
+  /**
+   * 状态机出口：把当前播放状态上报给快照采集器。
+   *
+   * 这是快照的唯一记录点。网页、普通语音、AI、定时任务、睡眠定时器和内部自动停止
+   * 都经过这些出口，因此不需要在各调用入口重复埋点，也不会随新入口漂移。
+   *
+   * 采集失败绝不影响播放控制：recorder 内部吞掉存储错误，这里再兜一层。
+   */
+  private async captureSnapshot(state: 'playing' | 'paused' | 'stopped'): Promise<void> {
+    if (!this.snapshotRecorder) return;
+
+    const song = this.getCurrentSong();
+    if (!song) return;
+
+    try {
+      const observation = buildObservation({
+        account_id: this.accountId,
+        device_id: this.deviceId,
+        // 电台与临时歌单都没有正式歌单身份：临时歌单 ID 为负数，交由 recorder 按范围拒绝
+        playlist_id: this.playlistId,
+        song_id: song.id,
+        song_index: this.currentIndex,
+        song_type: song.type,
+        state,
+        local_position: this.getPosition(),
+        paused_position: this.pausedPositionSec,
+        stop_position: this.lastStopPositionSec,
+        position_available: this.hasPositionFor(state),
+        speed: this.playbackSpeed,
+        play_mode: this.playMode,
+        target_count: this.targets.length,
+        title: song.title,
+        artist: song.artist,
+      });
+      if (!observation) return;
+      await this.snapshotRecorder.record(observation);
+    } catch (e) {
+      songloft.log.warn('[PlaylistManager] snapshot capture failed: ' + String(e));
+    }
+  }
+
+  /**
+   * 出口处的位置是否可信。
+   *
+   * playing 位置来自墙钟推算，只有起播基准已建立（playStartTimeMs > 0）才算可信；
+   * 否则按「无法取得位置」处理：位置记 0 且标记不可用（见需求「首次成功播放」条）。
+   * paused / stopped 的位置来自出口前显式抓取的字段，始终可信。
+   */
+  private hasPositionFor(state: 'playing' | 'paused' | 'stopped'): boolean {
+    return state === 'playing' ? this.playStartTimeMs > 0 : true;
   }
 
   /**
@@ -2155,10 +2243,20 @@ export class PlaylistManagerMap {
   private groupsSnapshot: DeviceGroup[] = [];
   private minaService: MinaService;
   private configManager: ConfigManager;
+  // 快照采集器：注入到每个新建 manager，由其状态机出口上报观测。未注入时不采集。
+  private snapshotRecorder?: PlaybackRecorder;
 
   constructor(minaService: MinaService, configManager: ConfigManager) {
     this.minaService = minaService;
     this.configManager = configManager;
+  }
+
+  /** 注入快照采集器；对已存在的 manager 一并生效。 */
+  setSnapshotRecorder(recorder: PlaybackRecorder | undefined): void {
+    this.snapshotRecorder = recorder;
+    for (const manager of this.managers.values()) {
+      manager.setSnapshotRecorder(recorder);
+    }
   }
 
   /**
@@ -2257,6 +2355,7 @@ export class PlaylistManagerMap {
 
     const manager = new PlaylistManager(primary.account_id, primary.device_id, this.minaService, this.configManager);
     manager.setTargets(targets);
+    manager.setSnapshotRecorder(this.snapshotRecorder);
 
     // 从主设备配置恢复播放列表状态（本身不发设备指令）
     const resumeAnchor = await this.restoreFromConfig(manager, primary.account_id, primary.device_id);

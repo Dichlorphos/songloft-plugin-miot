@@ -14,5 +14,8 @@
     // 因此测试里的相对导入必须带 .ts 扩展名，tsc 需要显式放行。
     "allowImportingTsExtensions": true
   },
-  "include": ["src"]
+  // 主检查只覆盖插件源码：Node 类型不参与，误用 node:* 内置模块会在此报错
+  // （QuickJS 运行时没有这些模块）。
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
 }

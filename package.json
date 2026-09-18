@@ -9,7 +9,7 @@
     "predev": "node scripts/fetch-holidays.mjs && node scripts/build-pinyin-data.mjs",
     "dev": "node scripts/songloft-plugin.cjs dev",
     "validate": "node scripts/songloft-plugin.cjs validate",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "node --test \"src/**/*.test.ts\"",
     "publish:release": "node scripts/songloft-plugin.cjs publish",
     "fetch:holidays": "node scripts/fetch-holidays.mjs",
@@ -19,6 +19,7 @@
   "devDependencies": {
     "@songloft/plugin-builder": "^2.13.7",
     "@songloft/plugin-sdk": "^2.13.8",
+    "@types/node": "^24.13.5",
     "pinyin-pro": "^3.28.1",
     "segmentit": "^2.0.3",
     "typescript": "^5.9.3"

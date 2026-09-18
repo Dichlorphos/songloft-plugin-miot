@@ -1,0 +1,10 @@
+{
+  // 纯逻辑测试单独检查：测试用 node:test / node:assert，需要 Node 类型；
+  // 这些类型绝不能进主 tsconfig，否则插件源码误用 node:* 就不再报错。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["@songloft/plugin-sdk", "node"]
+  },
+  "include": ["src/**/*.test.ts"],
+  "exclude": []
+}
