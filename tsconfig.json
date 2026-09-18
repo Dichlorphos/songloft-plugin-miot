@@ -9,7 +9,10 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "types": ["@songloft/plugin-sdk"],
-    "noEmit": true
+    "noEmit": true,
+    // 纯逻辑测试用 node:test 直接跑 .ts（Node 24 原生剥离类型），
+    // 因此测试里的相对导入必须带 .ts 扩展名，tsc 需要显式放行。
+    "allowImportingTsExtensions": true
   },
   "include": ["src"]
 }

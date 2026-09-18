@@ -9,6 +9,8 @@
     "predev": "node scripts/fetch-holidays.mjs && node scripts/build-pinyin-data.mjs",
     "dev": "songloft-plugin dev",
     "validate": "songloft-plugin validate",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"src/**/*.test.ts\"",
     "publish:release": "songloft-plugin publish",
     "fetch:holidays": "node scripts/fetch-holidays.mjs",
     "build:pinyin": "node scripts/build-pinyin-data.mjs",

@@ -13,6 +13,10 @@ npm install
 npm run dev         # watch + auto-upload to local Songloft
 npm run build       # produce dist/miot.jsplugin.zip
 npm run validate    # verify plugin.json hashes
+
+npm run typecheck   # tsc --noEmit
+npm test            # pure-logic tests (src/**/*.test.ts)
+node frontend/tests/run.mjs   # frontend contract tests
 ```
 
 ## Description

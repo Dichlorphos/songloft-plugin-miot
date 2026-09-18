@@ -1,10 +1,16 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const frontendRoot = path.resolve(new URL('..', import.meta.url).pathname);
+// 用 fileURLToPath 而不是 URL.pathname：Windows 上 pathname 形如 '/D:/repo/frontend/'，
+// 直接 path.resolve 会拼成 'D:\D:\repo\...'，导致测试从任何目录都跑不起来。
+const frontendRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const sourceRoot = path.join(frontendRoot, 'src');
-const read = (file) => fs.readFileSync(path.join(sourceRoot, file), 'utf8');
+// 源码里的换行按平台落盘（Windows 检出为 CRLF，macOS 为 LF）。
+// 断言写的是 LF，这里统一归一化，测试才能从任意平台、任意工作目录运行。
+const readFile = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+const read = (file) => readFile(path.join(sourceRoot, file));
 
 const api = read('api.ts');
 const store = read('store.ts');
@@ -14,13 +20,13 @@ const settingsPage = read('views/SettingsPage.vue');
 const rootApp = read('App.vue');
 const runtime = read('runtime.ts');
 const appBar = read('views/AppBar.vue');
-const publicIcon = fs.readFileSync(path.join(frontendRoot, 'public/icon.svg'), 'utf8');
+const publicIcon = readFile(path.join(frontendRoot, 'public/icon.svg'), 'utf8');
 const switchComponent = read('ui/SlSwitch.vue');
 const sliderComponent = read('ui/SlSlider.vue');
 const iconFont = read('ui/iconFont.ts');
 const nativeProps = read('ui/nativeProps.ts');
 const mainEntry = read('main.ts');
-const viteConfig = fs.readFileSync(path.join(frontendRoot, 'vite.config.ts'), 'utf8');
+const viteConfig = readFile(path.join(frontendRoot, 'vite.config.ts'), 'utf8');
 const selectComponent = read('ui/SlSelect.vue');
 const slListView = read('ui/SlListView.vue');
 const slButton = read('ui/SlButton.vue');
@@ -37,17 +43,17 @@ const sleepTimerPopup = read('views/PlayerSleepTimerPopup.vue');
 const progress = read('views/PlayerProgress.vue');
 const songRow = read('views/SongRow.vue');
 const covers = read('covers.ts');
-const playlistHandler = fs.readFileSync(path.join(frontendRoot, '../src/handlers/playlist.ts'), 'utf8');
-const scheduleHandler = fs.readFileSync(path.join(frontendRoot, '../src/handlers/schedule.ts'), 'utf8');
-const lyricHandler = fs.readFileSync(path.join(frontendRoot, '../src/handlers/lyric.ts'), 'utf8');
-const voiceCommandHandler = fs.readFileSync(path.join(frontendRoot, '../src/handlers/voice_command.ts'), 'utf8');
-const voiceEngine = fs.readFileSync(path.join(frontendRoot, '../src/voicecmd/engine.ts'), 'utf8');
-const playerManager = fs.readFileSync(path.join(frontendRoot, '../src/player/manager.ts'), 'utf8');
-const pluginTypes = fs.readFileSync(path.join(frontendRoot, '../src/types.ts'), 'utf8');
-const favorites = fs.readFileSync(path.join(frontendRoot, '../src/utils/favorites.ts'), 'utf8');
-const app = fs.readFileSync(path.join(frontendRoot, '../static/js/app.js'), 'utf8');
-const html = fs.readFileSync(path.join(frontendRoot, '../static/index.html'), 'utf8');
-const manifest = JSON.parse(fs.readFileSync(path.join(frontendRoot, '../plugin.json'), 'utf8'));
+const playlistHandler = readFile(path.join(frontendRoot, '../src/handlers/playlist.ts'), 'utf8');
+const scheduleHandler = readFile(path.join(frontendRoot, '../src/handlers/schedule.ts'), 'utf8');
+const lyricHandler = readFile(path.join(frontendRoot, '../src/handlers/lyric.ts'), 'utf8');
+const voiceCommandHandler = readFile(path.join(frontendRoot, '../src/handlers/voice_command.ts'), 'utf8');
+const voiceEngine = readFile(path.join(frontendRoot, '../src/voicecmd/engine.ts'), 'utf8');
+const playerManager = readFile(path.join(frontendRoot, '../src/player/manager.ts'), 'utf8');
+const pluginTypes = readFile(path.join(frontendRoot, '../src/types.ts'), 'utf8');
+const favorites = readFile(path.join(frontendRoot, '../src/utils/favorites.ts'), 'utf8');
+const app = readFile(path.join(frontendRoot, '../static/js/app.js'), 'utf8');
+const html = readFile(path.join(frontendRoot, '../static/index.html'), 'utf8');
+const manifest = JSON.parse(readFile(path.join(frontendRoot, '../plugin.json'), 'utf8'));
 
 assert.equal(manifest.renderEngine, 'webf');
 assert.match(html, /static\/js\/app\.js/);
@@ -312,7 +318,7 @@ assert.match(fullscreenPlayer, /notifyHostFavorite\(id, result\.is_favorited\)/)
 // env.d.ts 是手写的宿主 API 声明，必须与 common.js 的公开字面量一致。
 // 声明一个宿主并不提供的方法，等于让 TS 替一段死代码背书 —— 这就是上面那次静默失败的成因。
 // 只禁「声明」，不禁注释里提它——那段注释正是记录这次踩坑的。
-const envTypes = fs.readFileSync(path.join(frontendRoot, 'env.d.ts'), 'utf8');
+const envTypes = readFile(path.join(frontendRoot, 'env.d.ts'), 'utf8');
 assert.doesNotMatch(envTypes, /^\s*invokeHost\?\(/m);
 assert.match(envTypes, /favorite\?: \{/);
 
