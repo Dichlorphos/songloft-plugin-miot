@@ -140,7 +140,13 @@ export class ConversationMonitor {
       for (const dm of this.devices.values()) {
         dm.isRunning = true;
       }
-      songloft.log.info(`[ConversationMonitor] Started, devices=${this.devices.size} callbacks=${this.callbacks.size} interval=${intervalSec}s`);
+      // devices=0 是典型踩坑：开关打开但没在设备设置勾选任何音箱。
+      // 对话监听只轮询 managed 设备，但口令测试走直连，会表现为「测试正常、监听无声」。
+      if (this.devices.size === 0) {
+        songloft.log.warn(`[ConversationMonitor] Started with 0 managed devices — 请到"设备设置"勾选要监听的音箱，否则对话监听不会工作 (callbacks=${this.callbacks.size} interval=${intervalSec}s)`);
+      } else {
+        songloft.log.info(`[ConversationMonitor] Started, devices=${this.devices.size} callbacks=${this.callbacks.size} interval=${intervalSec}s`);
+      }
 
       // 先同步跑一轮把基线建起来，再装定时器。
       // 基线只能由首轮 poll 从服务端返回值建立；若等到第一个 tick（间隔可配到 30s），
