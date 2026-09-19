@@ -125,11 +125,11 @@ export class MinaService {
       // 获取设备硬件型号用于选择播放接口
       const { hardware } = await this.getDeviceIdentity(client, deviceId);
       const config = await this.configManager.getConfig();
-      const extraModels = config.extra_music_api_models || [];
+      const disabledModels = config.music_api_model_disabled || [];
       const keepLight = !!config.indicator_light_enabled;
       const customAudioId = config.default_cover_id;
       const lyricsEnabled = !!config.touchscreen_lyrics_enabled;
-      return await client.playByUrl(deviceId, url, hardware, extraModels, keepLight, customAudioId,
+      return await client.playByUrl(deviceId, url, hardware, disabledModels, keepLight, customAudioId,
         typeof song === 'string'
           ? { enabled: lyricsEnabled, songName: song || '' }
           : { enabled: lyricsEnabled, metadata: song });

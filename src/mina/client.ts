@@ -133,16 +133,16 @@ export class MinaHTTPClient {
    * @param deviceId - 设备 ID
    * @param url - 音频 URL
    * @param hardware - 设备硬件型号（用于选择播放方法）
-   * @param extraModels - 用户自定义的额外 Music API 型号列表
+   * @param disabledModels - 用户显式禁用 Music API 的型号列表（优先于默认白名单）
    * @param lyricsMode - 触屏歌词模式：仅在 Music API 播放路径上启用，
    *   逐首搜云端曲库匹配真实 audioID（搜不到回退 customAudioId），使触屏音箱显示歌词。
    *   参考 xiaomusic：player_play_music 有兼容性风险，非兼容型号仍走 player_play_url。
    */
-  async playByUrl(deviceId: string, url: string, hardware = '', extraModels?: string[], keepLight = false, customAudioId?: string, lyricsMode?: { enabled: boolean; songName?: string; metadata?: PlayMetadata }): Promise<boolean> {
-    const useMusicAPI = hardware ? needUsePlayMusicAPI(hardware, extraModels) : false;
+  async playByUrl(deviceId: string, url: string, hardware = '', disabledModels?: string[], keepLight = false, customAudioId?: string, lyricsMode?: { enabled: boolean; songName?: string; metadata?: PlayMetadata }): Promise<boolean> {
+    const useMusicAPI = hardware ? needUsePlayMusicAPI(hardware, disabledModels) : false;
     if (isDebugLog()) {
-      const disabled = Array.isArray(extraModels) ? extraModels.join(',') : '';
-      songloft.log.info(`[MinaClient] playByUrl device=${deviceId} hardware=${hardware} useMusicAPI=${useMusicAPI} keepLight=${keepLight} lyricsMode=${!!lyricsMode?.enabled} extraModels=[${disabled}] url=${this.redactAccessToken(url).slice(0, 160)}`);
+      const disabled = Array.isArray(disabledModels) ? disabledModels.join(',') : '';
+      songloft.log.info(`[MinaClient] playByUrl device=${deviceId} hardware=${hardware} useMusicAPI=${useMusicAPI} keepLight=${keepLight} lyricsMode=${!!lyricsMode?.enabled} disabledModels=[${disabled}] url=${this.redactAccessToken(url).slice(0, 160)}`);
     }
     if (useMusicAPI) {
       const fallbackAudioId = customAudioId || DEFAULT_MUSIC_AUDIO_ID;
