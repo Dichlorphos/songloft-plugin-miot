@@ -113,6 +113,10 @@ html.webf-engine .miot-app * { transform-origin: 0 0; }
 /* 不给 z-index：wrap 不创建层叠上下文，子元素 fixed 面板和遮罩直接参与根层叠上下文，
    z-index 300/200 能可靠地盖住播放条(80)和歌曲列表(songloft-org/songloft#432)。 */
 .sl-select-wrap { position: relative; width: 100%; }
+/* WebF 首帧缺陷：.field-grid 单元格是 flex item，它里面的 .sl-select-wrap 靠 width:100%
+   撑满；这条百分比链首次布局解析不出来，下拉会塌成固有宽、占位文案被裁。
+   块级 width:auto 走 fill-available 主路径，不做百分比解析，视觉等价。 */
+html.webf-engine .sl-select-wrap { width: auto; }
 .sl-select-wrap .sl-select-trigger { display: block; width: 100%; height: 40px; padding: 0 12px; border: 1px solid var(--md-outline); border-radius: var(--md-radius-sm); background: var(--md-surface); color: var(--md-on-surface); }
 .sl-select-wrap .sl-select-trigger:hover { border-color: var(--md-outline); background: var(--md-surface-container-high); box-shadow: none; }
 .sl-select-wrap .sl-select-trigger:focus-visible { outline: 0; }
@@ -131,7 +135,9 @@ html.webf-engine .miot-app * { transform-origin: 0 0; }
    SEARCH_ROW_H 必须一致——面板总高和内层 maxHeight 都按它让位。 */
 .sl-select-panel-search { display: flex; box-sizing: border-box; height: 48px; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--md-outline-variant); background: var(--md-surface-container); color: var(--md-on-surface-variant); }
 .sl-select-panel-search .sl-icon { flex-shrink: 0; }
-.sl-select-panel-search .sl-input, .sl-select-panel-search .sl-input-native { min-width: 0; flex: 1; height: 100%; padding: 0; border: 0; outline: 0; background: transparent; color: var(--md-on-surface); }
+.sl-select-panel-search .sl-input, .sl-select-panel-search .sl-input-native { min-width: 0; flex: 1; height: 100%; outline: 0; }
+/* 装饰只给 HTML 分支：原生 cupertino 输入框带了就会双份绘制。 */
+.sl-select-panel-search .sl-input { padding: 0; border: 0; background: transparent; color: var(--md-on-surface); }
 .sl-select-empty { padding: 16px 12px; color: var(--md-on-surface-variant); font-size: 13px; text-align: center; }
 /* 透明全屏遮罩：webf 不会对「点空白处」派发 document pointerdown，
    纯靠 document 监听收不起下拉。挂一个 fixed 遮罩兜住所有面板外的点击，
@@ -153,10 +159,13 @@ html.webf-engine .miot-app * { transform-origin: 0 0; }
 .sl-button-icon { width: 40px; padding: 0; border-radius: 50%; }
 .sl-button:hover:not(:disabled) { box-shadow: var(--md-shadow-1); }
 .sl-button-text:hover:not(:disabled) { background: var(--md-primary-container); }
-.sl-input, .sl-input-native { width: 100%; height: 42px; padding: 0 12px; border: 1px solid var(--md-outline); border-radius: var(--md-radius-sm); background: var(--md-surface); color: var(--md-on-surface); outline: 0; }
+/* HTML 分支与原生 Cupertino 分支必须分开写，绝不能合并选择器：
+   CupertinoTextField 会把 CSS 的 decoration 当成自己的 decoration，WebF render box
+   又画一份，两份错位形成双框。原生分支只给尺寸，背景/边框/圆角/内边距一律不写。 */
+.sl-input, .sl-input-native { width: 100%; height: 42px; outline: 0; }
+.sl-input { padding: 0 12px; border: 1px solid var(--md-outline); border-radius: var(--md-radius-sm); background: var(--md-surface); color: var(--md-on-surface); }
 .sl-input:focus { border-color: var(--md-primary); box-shadow: 0 0 0 1px var(--md-primary); }
 .sl-input:focus-visible, .sl-input-native:focus-visible { outline: 0; }
-.sl-input-native { border: 0; }
 .sl-checkbox { width: 20px; height: 20px; accent-color: var(--md-primary); }
 .switch { position: relative; display: inline-block; width: 52px; height: 32px; cursor: pointer; flex-shrink: 0; }
 .switch input { width: 0; height: 0; opacity: 0; }
@@ -186,7 +195,9 @@ html.webf-engine .miot-app * { transform-origin: 0 0; }
 .sl-list-view-html { overflow-y: auto; border-top: 1px solid var(--md-outline-variant); }
 
 .search-bar { display: flex; align-items: center; gap: 8px; height: 48px; margin-bottom: 12px; padding: 0 12px; border: 1px solid var(--md-outline-variant); border-radius: var(--md-radius-full); background: var(--md-surface-container-low); color: var(--md-on-surface-variant); }
-.search-bar input, .search-bar .sl-input-native { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--md-on-surface); }
+.search-bar input, .search-bar .sl-input-native { min-width: 0; flex: 1; outline: 0; }
+/* 同上：装饰只给 HTML 分支。 */
+.search-bar input, .search-bar .sl-input { border: 0; background: transparent; color: var(--md-on-surface); }
 .song-list-empty { min-height: 220px; display: flex; align-items: center; justify-content: center; color: var(--md-on-surface-variant); text-align: center; }
 /* 行高必须**精确**等于 --miot-row-height，不能只给 min-height：MainPage 的虚拟列表
    靠 `行号 × 行高` 算占位条高度和 scrollTop，行高哪怕差 1px，滚到第 1900 行也会偏出
@@ -374,6 +385,8 @@ html.webf-engine .settings-content { height: 100%; overflow-y: auto; }
 .field { min-width: 0; margin-bottom: 16px; }
 .field-label { display: block; margin-bottom: 6px; color: var(--md-on-surface-variant); font-size: 12px; font-weight: 500; }
 .field-help { margin-top: 6px; color: var(--md-on-surface-variant); font-size: 12px; overflow-wrap: anywhere; }
+.preset-key-link { display: inline-block; margin-top: 6px; font-size: 12px; color: var(--md-primary, #4f7cff); text-decoration: none; cursor: pointer; }
+.preset-key-link:hover { text-decoration: underline; }
 .field-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 /* 用 flex 而不是 grid：这个容器在 APP（WebF）里会「算出布局但不绘制」——页内探针
    getBoundingClientRect 返回正常的 309x42，屏幕上整行却不存在，uiautomator 里也没有
@@ -389,6 +402,13 @@ html.webf-engine .settings-content { height: 100%; overflow-y: auto; }
    （那会把「输入框 + 按钮」这种紧凑单行撑开）。 */
 .grid-cell { min-width: 0; }
 .inline-fields { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+/* AI「模型」行（下拉 + 刷新按钮）必须复用 .inline-fields：WebF 下 flex 子项没有显式
+   flex 尺寸就不会收缩，下拉会按固有宽度把按钮挤出本列、叠到右列。 */
+.model-row > .sl-select-wrap { min-width: 0; flex: 1 1 200px; }
+.model-row > .sl-button { flex: 0 0 auto; }
+/* 自定义模型输入框不套裸 div：flutter-cupertino-input 是 RenderWidget，包一层会被
+   WebF 量到视口宽而铺满整行。直接挂 .field，间距用自身 margin-top。 */
+.model-custom-input { width: 100%; margin-top: 8px; }
 .inline-fields > .sl-input,
 .inline-fields > .sl-input-native,
 .inline-fields > .sl-select,

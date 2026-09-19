@@ -8,6 +8,7 @@ import SlInput from '../../ui/SlInput.vue';
 import SlSelect from '../../ui/SlSelect.vue';
 import SlSwitch from '../../ui/SlSwitch.vue';
 import { del, post, pluginWebSocketUrl } from '../../api';
+import { AI_PRESET_PROVIDERS } from '../../aiPresets';
 import {
   addWebhook,
   clearMemory,
@@ -136,8 +137,34 @@ const expandedMemory = ref<string | null>(null);
 const aiModelsList = ref<{ id: string; ownedBy?: string }[]>([]);
 const aiModelLoading = ref(false);
 const aiModelError = ref('');
+const aiConnState = ref<'idle' | 'loading' | 'ok' | 'error'>('idle');
+const aiConnLatency = ref<number | null>(null);
 let conversationSocket: WebSocket | null = null;
 let conversationPoll: ReturnType<typeof setInterval> | null = null;
+
+// --- AI 预设服务商（国内主流 OpenAI 兼容服务） ---
+const aiPresetOptions = [
+  { value: 'custom', label: '自定义（OpenAI 兼容）', searchText: '自定义 openai 兼容' },
+  ...AI_PRESET_PROVIDERS.map((p) => ({ value: p.id, label: p.name, searchText: p.name })),
+];
+const selectedAiPreset = ref('custom');
+const selectedAiPresetObj = computed(() => AI_PRESET_PROVIDERS.find((p) => p.id === selectedAiPreset.value) || null);
+
+/** 选中预设即自动填 API 地址与默认模型（不碰 API Key）；选「自定义」保留手填。 */
+async function applyAiPreset(id: string): Promise<void> {
+  selectedAiPreset.value = id;
+  if (id === 'custom') {
+    notify('已选择自定义，请填写 API 地址与模型', 'success');
+    return;
+  }
+  const p = AI_PRESET_PROVIDERS.find((x) => x.id === id);
+  if (!p) return;
+  state.config.ai_config.api_url = p.baseUrl;
+  if (p.defaultModel) state.config.ai_config.model = p.defaultModel;
+  modelCustomActive.value = false;
+  await saveConfig({ ai_config: state.config.ai_config });
+  notify(`已套用预设「${p.name}」，请填写 API Key`, 'success');
+}
 
 function syncSourceDrafts(): void {
   for (const source of Array.isArray(state.config.external_search_sources) ? state.config.external_search_sources : []) {
@@ -205,11 +232,18 @@ syncSourceDrafts();
 onMounted(async () => {
   await Promise.all([loadVoiceData(), loadSearchProviders()]);
   syncSourceDrafts();
-  // 如果已有 API 配置，预拉取模型列表（同时充当预检）
+  // 静默预检模型列表：填充下拉并测量连接延迟，不弹通知。
   if (state.config.ai_config.api_url && state.config.ai_config.api_key) {
-    void refreshAiModels();
+    void refreshAiModels(true).then(() => {
+      const cur = state.config.ai_config.model || '';
+      modelCustomActive.value = !!cur && !aiModelsList.value.some((m) => m.id === cur);
+    });
   }
   if (state.config.conversation_monitor_enabled) connectConversation();
+  // 反查当前 api_url 命中的预设：命中则高亮该预设（隐藏地址框），无匹配则归为「自定义」。
+  const cur = (state.config.ai_config.api_url || '').trim().replace(/\/+$/, '');
+  const hit = AI_PRESET_PROVIDERS.find((p) => p.baseUrl.replace(/\/+$/, '') === cur);
+  selectedAiPreset.value = hit ? hit.id : 'custom';
 });
 onUnmounted(() => {
   conversationSocket?.close();
@@ -495,32 +529,86 @@ async function testAI(): Promise<void> {
 }
 
 /** 拉取可用模型列表（同时预检 API 连通性） */
-async function refreshAiModels(): Promise<void> {
+/**
+ * 拉取模型列表并测量连通性与延迟。
+ * @param silent true=静默预检（进页面自动执行，不弹通知）；false=用户主动刷新（弹通知）
+ */
+async function refreshAiModels(silent = false): Promise<void> {
+  if (!state.config.ai_config.api_url || !state.config.ai_config.api_key) {
+    aiConnState.value = 'idle';
+    return;
+  }
   aiModelLoading.value = true;
   aiModelError.value = '';
   aiModelsList.value = [];
+  aiConnState.value = 'loading';
+  const startedAt = Date.now();
   try {
     await loadAiModels();
     aiModelsList.value = Array.isArray(state.aiModels) ? state.aiModels : [];
-    notify(`已获取 ${aiModelsList.value.length} 个可用模型`, 'success');
+    aiConnLatency.value = Date.now() - startedAt;
+    aiConnState.value = 'ok';
+    if (!silent) notify(`已获取 ${aiModelsList.value.length} 个可用模型，延迟 ${aiConnLatency.value} ms`, 'success');
   } catch (error) {
     aiModelError.value = messageOf(error);
     aiModelsList.value = [];
-    notify(aiModelError.value, 'error');
+    aiConnLatency.value = null;
+    aiConnState.value = 'error';
+    if (!silent) notify(aiModelError.value, 'error');
   } finally {
     aiModelLoading.value = false;
   }
 }
 
+const aiConnChipClass = computed(() => {
+  if (aiConnState.value === 'ok') return 'chip-success';
+  if (aiConnState.value === 'error') return 'chip-warning';
+  return '';
+});
+
+const aiConnText = computed(() => {
+  const configured = !!state.config.ai_config.api_url && !!state.config.ai_config.api_key;
+  switch (aiConnState.value) {
+    case 'loading': return '连接检测中…';
+    case 'ok': return `已连接 · ${aiConnLatency.value} ms`;
+    case 'error': return `连接失败：${aiModelError.value}`;
+    default: return configured ? '尚未检测' : '未配置 API';
+  }
+});
+
 // --- end of model fetching ---
 
-const aiModelOptions = computed<SelectOption[]>(() =>
-  aiModelsList.value.map((m) => ({
+// 模型下拉末尾固定追加「自定义模型名…」，选中才展开手填框。
+const AI_MODEL_CUSTOM = '__custom_model__';
+
+const aiModelOptions = computed<SelectOption[]>(() => [
+  ...aiModelsList.value.map((m) => ({
     value: m.id,
     label: m.ownedBy ? `${m.id} (${m.ownedBy})` : m.id,
     searchText: m.id,
   })),
+  { value: AI_MODEL_CUSTOM, label: '自定义模型名…', searchText: '自定义' },
+]);
+
+// 当前是否处于「自定义模型名」模式；下拉回显值在自定义模式下映射为哨兵项。
+const modelCustomActive = ref(false);
+const aiModelSelectValue = computed(() =>
+  modelCustomActive.value ? AI_MODEL_CUSTOM : (state.config.ai_config.model || ''),
 );
+
+/**
+ * 模型下拉选择处理。必须放在 script 方法里：模板内联表达式里 ref 会被自动解包，
+ * 直接写 modelCustomActive.value = ... 会触发 WebF 的 readonly 赋值报错。
+ */
+function onModelSelect(v: string): void {
+  if (v === AI_MODEL_CUSTOM) {
+    modelCustomActive.value = true;
+    return;
+  }
+  modelCustomActive.value = false;
+  state.config.ai_config.model = v;
+  void saveConfig({ ai_config: state.config.ai_config });
+}
 
 async function addSource(): Promise<void> {
   if (!newSourceUrl.value.trim()) {
@@ -793,36 +881,52 @@ async function deleteMemoryRecord(id?: string): Promise<void> {
     <SettingRow title="启用 AI 分析" :subtitle="state.config.voice_command_enabled ? '规则和记忆未命中时再调用 AI' : '需要先开启语音口令'"><SlSwitch :model-value="!!state.config.ai_config.enabled" :disabled="!state.config.voice_command_enabled" @update:model-value="setAIEnabled" /></SettingRow>
     <div v-if="!state.config.voice_command_enabled" class="dependency-hint"><SlIcon name="warning" :size="18" /><span>需要先开启"语音口令"才能使用 AI 分析。</span></div>
     <div class="form-body">
-      <div class="field"><label class="field-label">API 地址</label><SlInput :model-value="state.config.ai_config.api_url || ''" placeholder="https://api.example.com/v1" @update:model-value="state.config.ai_config.api_url = $event" @change="saveConfig({ ai_config: state.config.ai_config })" /></div>
+      <div class="field">
+        <label class="field-label">预设服务商</label>
+        <SlSelect
+          :model-value="selectedAiPreset"
+          :options="aiPresetOptions"
+          placeholder="选择预设或自定义"
+          aria-label="选择 AI 预设服务商"
+          @update:model-value="applyAiPreset"
+        />
+      </div>
+      <div v-if="selectedAiPreset === 'custom'" class="field"><label class="field-label">API 地址</label><SlInput :model-value="state.config.ai_config.api_url || ''" placeholder="https://api.example.com/v1" @update:model-value="state.config.ai_config.api_url = $event" @change="saveConfig({ ai_config: state.config.ai_config })" /></div>
       <div class="field"><label class="field-label">API Key</label><SlInput :model-value="state.config.ai_config.api_key || ''" type="password" placeholder="sk-..." @update:model-value="state.config.ai_config.api_key = $event" @change="saveConfig({ ai_config: state.config.ai_config })" /></div>
+      <a v-if="selectedAiPresetObj" class="preset-key-link" :href="selectedAiPresetObj.apiKeyUrl" target="_blank" rel="noopener" :title="`官网：${selectedAiPresetObj.websiteUrl}`">前往 {{ selectedAiPresetObj.name }} 获取 API Key ↗</a>
       <div class="field-grid">
         <div class="field">
           <label class="field-label">模型</label>
-          <div style="display:flex;gap:8px;align-items:flex-start;">
+          <!-- 复用 .inline-fields 而不是手写 display:flex：WebF 下子项没有显式 flex 尺寸就不会收缩，下拉会把「刷新」挤出本列。 -->
+          <div class="inline-fields model-row">
             <SlSelect
-              :model-value="state.config.ai_config.model || ''"
+              :model-value="aiModelSelectValue"
               :options="aiModelOptions"
               placeholder="点击刷新获取可用模型"
               aria-label="选择 AI 模型"
               searchable
               search-placeholder="搜索模型名称"
-              @update:model-value="(v) => { state.config.ai_config.model = v; void saveConfig({ ai_config: state.config.ai_config }); }"
+              @update:model-value="onModelSelect"
             />
-            <SlButton variant="outlined" label="刷新" icon="refresh" :disabled="aiModelLoading || !state.config.ai_config.api_url || !state.config.ai_config.api_key" @click="refreshAiModels" title="调用 /v1/models 预检 API 并获取模型列表" />
+            <SlButton variant="outlined" label="刷新" icon="refresh" :disabled="aiModelLoading || !state.config.ai_config.api_url || !state.config.ai_config.api_key" @click="() => refreshAiModels()" title="调用 /models 预检 API、获取模型列表并测量延迟" />
           </div>
-          <!-- 手动填写兜底：部分 OpenAI 兼容服务不提供 /v1/models，或列表拉取失败时下拉为空，
-               此时必须允许直接输入模型名，否则模型完全无法配置。 -->
-          <div style="margin-top:8px;">
+          <!-- 自定义模型名：仅在下拉选「自定义模型名…」或当前模型不在列表时展开。 -->
+          <template v-if="modelCustomActive">
             <SlInput
+              class="model-custom-input"
               :model-value="state.config.ai_config.model || ''"
               placeholder="手动填写模型名，如 qwen-plus"
-              aria-label="手动填写模型名"
-              @update:model-value="(v) => { state.config.ai_config.model = v; }"
+              aria-label="手动填写 AI 模型名"
+              @update:model-value="state.config.ai_config.model = $event"
               @change="saveConfig({ ai_config: state.config.ai_config })"
             />
-          </div>
+            <div class="field-help">若接口不支持 /v1/models 或列表没有目标模型，可直接填写模型名。</div>
+          </template>
         </div>
         <div class="field"><label class="field-label">超时（秒）</label><SlInput :model-value="String(state.config.ai_config.timeout || 6)" type="number" @update:model-value="state.config.ai_config.timeout = Math.max(1, Math.min(30, Number($event) || 6))" @change="saveConfig({ ai_config: state.config.ai_config })" /></div>
+      </div>
+      <div class="status-chips">
+        <span class="chip" :class="aiConnChipClass">{{ aiConnText }}</span>
       </div>
       <div v-if="aiModelError" class="field-help" style="color:#ef5350;">{{ aiModelError }}</div>
       <div v-if="aiModelLoading && aiModelsList.length === 0" class="field-help">正在连接 API 获取模型列表...</div>
