@@ -12,6 +12,7 @@ import {
   type PlaybackContentType,
   type PlaybackSnapshotState,
   type PlaybackSourceDevice,
+  type PlaybackSnapshot,
 } from './snapshot_store.ts';
 
 /** 状态机出口上报的一次播放观测。 */
@@ -47,6 +48,8 @@ export interface SwitchSampleRequest {
 export interface SwitchSampleResult {
   ok: boolean;
   reason?: 'no_snapshot' | 'sample_failed' | 'stale' | 'storage_error';
+  /** 采样成功并写入后，返回新 revision 的快照；失败时缺省。 */
+  snapshot?: PlaybackSnapshot;
 }
 
 /** 采样超时阈值：源设备位置采样超过 2 秒视为失败。 */
@@ -112,7 +115,7 @@ export class PlaybackRecorder {
     if (!result.ok) {
       return { ok: false, reason: result.reason === 'stale' ? 'stale' : 'storage_error' };
     }
-    return { ok: true };
+    return { ok: true, snapshot: result.snapshot };
   }
 
   /**

@@ -16,7 +16,7 @@ import { setHostBaseUrl } from '../utils/http.ts';
 import { SwitchCoordinator } from './switch_coordinator.ts';
 import { PendingContextStore } from './pending_store.ts';
 import { PlaybackSnapshotStore } from './snapshot_store.ts';
-import { createHostPendingStorage, createHostSnapshotStorage } from './index.ts';
+import { createHostPendingStorage, createHostSnapshotStorage, getPlaybackRecorder, resetPlaybackRecorderForTest } from './index.ts';
 import { isDeviceInGroup, loadSongById, playPendingContext, sampleSourcePosition } from './host_deps.ts';
 
 /** 内存版 songloft 宿主；记录控制命令，绝不出网。 */
@@ -77,6 +77,8 @@ async function buildHarness(options: { groups?: any[]; songMissing?: boolean; pl
 
   if (options.groups) storage.set('device_groups', JSON.stringify(options.groups));
 
+  // 单例 recorder 会缓存首个 fake storage；每个用例安装新 fake 后必须重置，避免跨用例串数据。
+  resetPlaybackRecorderForTest();
   const configManager = new ConfigManager();
   const accountManager = new AccountManager(configManager);
   const mina = makeFakeMina(controlCalls, options.playState);
@@ -89,8 +91,13 @@ async function buildHarness(options: { groups?: any[]; songMissing?: boolean; pl
     getCurrentDevice: (accountId) => accountManager.getLastSelectedDevice(accountId),
     setCurrentDevice: async (accountId, deviceId) => accountManager.setLastSelectedDevice(accountId, deviceId),
     isGroupDevice: (accountId, deviceId) => isDeviceInGroup(configManager, accountId, deviceId),
-    samplePosition: (accountId, deviceId) =>
-      sampleSourcePosition(playlistManagerMap.get(accountId, deviceId), mina, accountId, deviceId),
+    // 与生产接线一致：采样规则归任务 01 的 recorder.sampleOnSwitch。
+    sampleOnSwitch: (accountId, deviceId) => getPlaybackRecorder().sampleOnSwitch({
+      account_id: accountId,
+      device_id: deviceId,
+      samplePosition: () =>
+        sampleSourcePosition(playlistManagerMap.get(accountId, deviceId), mina, accountId, deviceId),
+    }),
     loadSong: (songId) => loadSongById(songId),
     playPlaylist: (accountId, targetDeviceId, playlistId, song, songIndex, positionSec, mode, speed) =>
       playPendingContext(playlistManagerMap, accountId, targetDeviceId, playlistId, song, songIndex, positionSec, mode, speed),

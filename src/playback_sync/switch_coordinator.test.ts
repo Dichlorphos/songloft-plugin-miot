@@ -71,9 +71,22 @@ function makeCoordinator(options: {
     getCurrentDevice: async () => state.currentDevice,
     setCurrentDevice: async (_accountId, deviceId) => { state.currentDevice = deviceId; },
     isGroupDevice: async () => !!options.isGroup,
-    samplePosition: async () => {
+    // 任务 01 的采样入口：负责采样、2 秒超时与 revision 写入，这里用内存 store 复刻其语义。
+    sampleOnSwitch: async () => {
       calls.push('sample');
-      return options.sampled === undefined ? 42 : options.sampled;
+      if (options.sampled === null) return { ok: false, reason: 'sample_failed' as const };
+      const current = await snapshotStore.read('acc1');
+      if (!current) return { ok: false, reason: 'no_snapshot' as const };
+      const written = await snapshotStore.write({
+        ...current,
+        position_sec: options.sampled === undefined ? 42 : options.sampled,
+        position_available: true,
+        updated_at: 10_000,
+        base_revision: current.revision,
+      });
+      return written.ok && written.snapshot
+        ? { ok: true, snapshot: written.snapshot }
+        : { ok: false, reason: 'storage_error' as const };
     },
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
     playPlaylist: async (_accountId, _targetDeviceId, playlistId, song, songIndex, positionSec, mode, _speed) => {
@@ -166,7 +179,7 @@ test('pending 过期时不消费并报告无上下文', async () => {
     getCurrentDevice: async () => 'devA',
     setCurrentDevice: async () => {},
     isGroupDevice: async () => false,
-    samplePosition: async () => 42,
+    sampleOnSwitch: async () => ({ ok: true }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
     playPlaylist: async () => { calls.push('play'); return 'succeeded'; },
   });
@@ -187,7 +200,7 @@ test('取不到歌曲对象时保留 pending 并报告失败', async () => {
     getCurrentDevice: async () => 'devA',
     setCurrentDevice: async () => {},
     isGroupDevice: async () => false,
-    samplePosition: async () => 42,
+    sampleOnSwitch: async () => ({ ok: true }),
     loadSong: async () => null,
     playPlaylist: async () => 'succeeded',
   });
@@ -235,7 +248,7 @@ test('恢复只有命中原 song_id 才恢复位置；回退从 0 开始', async
     getCurrentDevice: async () => 'devA',
     setCurrentDevice: async () => {},
     isGroupDevice: async () => false,
-    samplePosition: async () => 42,
+    sampleOnSwitch: async () => ({ ok: true }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
     playPlaylist: async (_accountId, _targetDeviceId, _playlistId, song, songIndex, positionSec, _mode, _speed) => {
       played.push({ songId: song.id, index: songIndex, position: positionSec });
@@ -261,7 +274,7 @@ test('暂停态切换不采样，沿用状态机出口写好的位置', async ()
     getCurrentDevice: async () => 'devA',
     setCurrentDevice: async () => {},
     isGroupDevice: async () => false,
-    samplePosition: async () => { calls.push('sample'); return 42; },
+    sampleOnSwitch: async () => ({ ok: true }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
     playPlaylist: async () => 'succeeded',
   });
@@ -295,7 +308,7 @@ test('快速连续切换按最新选择落定，源设备取上一个选择', as
       current = deviceId;
     },
     isGroupDevice: async () => false,
-    samplePosition: async () => 42,
+    sampleOnSwitch: async () => ({ ok: true }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
     playPlaylist: async () => 'succeeded',
   });

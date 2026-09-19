@@ -32,4 +32,8 @@ Blocked by: 01
 - 2026-09-19：补充宿主集成测试（switch_integration.test.ts，6 例）：用内存 fake 替换 songloft 与 MinaService，装配真实 ConfigManager/PlaylistManagerMap/PlaylistManager，覆盖「切换不发控制命令」「切换用物理位置刷新快照」「继续才下发 URL 且带 seek、成功后清除 pending」「取不到歌曲不下发且保留」「歌单为空在加载阶段失败且保留」「任一侧属设备组完全跳过同步」。
 - 2026-09-19：为让集成测试可跑，新增 Node ESM 解析钩子（scripts/ts-resolve-hooks.mjs + register-ts-hooks.mjs），给旧模块的无扩展名相对导入补 .ts、并让裸 JSON 导入可加载；npm test 通过 --import 接入该钩子。player/manager 的 MinaService 改为 import type（仅作类型使用），剪掉测试时不需加载的 service→mina→miio→pako 依赖链。tsconfig.test.json 的 include 补上 src/types/*.d.ts，使宿主链的 pako 声明对测试可见。
 - 2026-09-19：验收命令：npm test（75 通过，含 6 条宿主集成）、npm run typecheck、node frontend/tests/run.mjs、npm run build 全部通过。构建产物 hash 与改动前一致，确认 import type 与测试钩子不影响打包。
+- 2026-09-19：两轴代码评审（固定点 8b9d6d1）后采纳整改。
+  - **采样入口归一（两轴共同命中）**：任务 01 已暴露 PlaybackRecorder.sampleOnSwitch，但本任务在 switch_coordinator 里把「采样 + 2 秒超时 + revision 写入」又实现了一遍，且该入口在生产代码中从未被调用。现改为 coordinator 注入并调用 sampleOnSwitch，删除重复实现；SwitchSampleResult 增加可选 snapshot 以回传新 revision。新增 sample_entrypoint.test.ts 做防回归（含变异验证）。
+  - **语音/AI resume 绕过 pending（Spec 硬要求缺口）**：VoiceEngine.executeResume 原先先判 hasPlaylist()，切到新设备后目标 manager 为空即播报「没有正在播放的内容」。现抽 oicecmd/resume_pending.ts，在 hasPlaylist 之前先消费 pending；pending 存在时无论 succeeded/failed/unknown 都不静默回退目标原上下文。
+  - **标签集补齐（Standards 硬性）**：Status: done 原不在 triage-labels.md 的标签集内；按该文件「Edit the right-hand column to match whatever vocabulary you actually use」的约定补入 done，并注明它不代表真机验收已覆盖。
 

@@ -12,7 +12,7 @@
 
 import { PendingContextStore, type PendingContext } from './pending_store.ts';
 import { PlaybackSnapshotStore, type PlaybackSnapshot } from './snapshot_store.ts';
-import { SAMPLE_TIMEOUT_MS } from './recorder.ts';
+import type { SwitchSampleResult } from './recorder.ts';
 
 /** 设备选择结果。切换接口本身始终成功，后台同步失败只记录日志。 */
 export interface SwitchResult {
@@ -46,8 +46,11 @@ export interface SwitchCoordinatorDeps {
   setCurrentDevice: (accountId: string, deviceId: string) => Promise<void>;
   /** 目标或源是否为设备组成员；组成员完全跳过同步。 */
   isGroupDevice: (accountId: string, deviceId: string) => Promise<boolean>;
-  /** 采样源设备物理位置；null 表示失败。 */
-  samplePosition: (accountId: string, deviceId: string) => Promise<number | null>;
+  /**
+   * 切换时刷新源设备快照。这里注入任务 01 暴露的采样入口（PlaybackRecorder.sampleOnSwitch），
+   * 采样、2 秒超时与 revision 写入都归它，避免同一规则在本层再实现一遍而漂移。
+   */
+  sampleOnSwitch: (accountId: string, deviceId: string) => Promise<SwitchSampleResult>;
   /** 按 song_id 取回同一播放服务的歌曲对象；取不到返回 null。 */
   loadSong: (songId: number) => Promise<LoadedSong | null>;
   /**
@@ -75,7 +78,7 @@ export class SwitchCoordinator {
   private readonly getCurrentDevice: SwitchCoordinatorDeps['getCurrentDevice'];
   private readonly setCurrentDevice: SwitchCoordinatorDeps['setCurrentDevice'];
   private readonly isGroupDevice: SwitchCoordinatorDeps['isGroupDevice'];
-  private readonly samplePosition: SwitchCoordinatorDeps['samplePosition'];
+  private readonly sampleOnSwitch: SwitchCoordinatorDeps['sampleOnSwitch'];
   private readonly loadSong: SwitchCoordinatorDeps['loadSong'];
   private readonly playPlaylist: SwitchCoordinatorDeps['playPlaylist'];
   private readonly log: (message: string) => void;
@@ -93,7 +96,7 @@ export class SwitchCoordinator {
     this.getCurrentDevice = deps.getCurrentDevice;
     this.setCurrentDevice = deps.setCurrentDevice;
     this.isGroupDevice = deps.isGroupDevice;
-    this.samplePosition = deps.samplePosition;
+    this.sampleOnSwitch = deps.sampleOnSwitch;
     this.loadSong = deps.loadSong;
     this.playPlaylist = deps.playPlaylist;
     this.log = deps.log ?? (() => {});
@@ -189,25 +192,17 @@ export class SwitchCoordinator {
     let sampled: PlaybackSnapshot = snapshot;
     // 只有 playing 才在切换时采样物理位置：pause/stop 的位置已由状态机出口写好，
     // 切换时再采会把设备端可能为 0 的位置覆盖掉。
-    const canSample = snapshot.state === 'playing';
-    try {
-      const position = canSample ? await this.sampleWithTimeout(accountId, sourceDeviceId) : null;
-      if (position !== null && Number.isFinite(position)) {
-        const result = await this.snapshotStore.write({
-          ...snapshot,
-          position_sec: Math.max(0, position),
-          position_available: true,
-          updated_at: this.now(),
-          base_revision: snapshot.revision,
-        });
+    if (snapshot.state === 'playing') {
+      try {
+        const result = await this.sampleOnSwitch(accountId, sourceDeviceId);
         if (result.ok && result.snapshot) {
           sampled = result.snapshot;
-        } else {
-          this.log(`[SwitchCoordinator] snapshot sample write skipped reason=${result.reason ?? 'unknown'}`);
+        } else if (!result.ok) {
+          this.log(`[SwitchCoordinator] switch sample skipped reason=${result.reason ?? 'unknown'}`);
         }
+      } catch (e) {
+        this.log(`[SwitchCoordinator] switch sample failed: ${String(e)}`);
       }
-    } catch (e) {
-      this.log(`[SwitchCoordinator] sample position failed: ${String(e)}`);
     }
 
     // 过期且采样未产生新 revision 时不同步：目标保持原上下文。
@@ -234,20 +229,6 @@ export class SwitchCoordinator {
     }
   }
 
-  /** 采样物理位置，超过 2 秒视为失败（规范「源设备位置采样超过 2 秒视为失败」）。 */
-  private async sampleWithTimeout(accountId: string, deviceId: string): Promise<number | null> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const timeout = new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), SAMPLE_TIMEOUT_MS);
-      });
-      return await Promise.race([this.samplePosition(accountId, deviceId), timeout]);
-    } catch {
-      return null;
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-    }
-  }
 
 
   /**
@@ -318,3 +299,4 @@ export class SwitchCoordinator {
     await this.clearPending(accountId, targetDeviceId);
   }
 }
+

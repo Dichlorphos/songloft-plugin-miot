@@ -102,7 +102,12 @@ async function onInit(): Promise<void> {
     getCurrentDevice: (accountId) => accountManager.getLastSelectedDevice(accountId),
     setCurrentDevice: (accountId, deviceId) => minaService.updateLastSelection(accountId, deviceId).then(() => undefined),
     isGroupDevice: (accountId, deviceId) => isDeviceInGroup(configManager, accountId, deviceId),
-    samplePosition: (accountId, deviceId) => sampleSourcePosition(playlistManagerMap.get(accountId, deviceId), minaService, accountId, deviceId),
+    // 采样与 2 秒超时归任务 01 暴露的 recorder.sampleOnSwitch，这里只提供源设备位置。
+    sampleOnSwitch: (accountId, deviceId) => getPlaybackRecorder().sampleOnSwitch({
+      account_id: accountId,
+      device_id: deviceId,
+      samplePosition: () => sampleSourcePosition(playlistManagerMap.get(accountId, deviceId), minaService, accountId, deviceId),
+    }),
     loadSong: (songId) => loadSongById(songId),
     playPlaylist: (accountId, targetDeviceId, playlistId, song, songIndex, positionSec, mode, speed) =>
       playPendingContext(playlistManagerMap, accountId, targetDeviceId, playlistId, song, songIndex, positionSec, mode, speed),
