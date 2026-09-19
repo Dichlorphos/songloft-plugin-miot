@@ -3,6 +3,7 @@
 
 /// <reference types="@songloft/plugin-sdk" />
 
+import { aiChatCompletionsUrl } from '../utils/ai_url';
 import type { AIConfig, AIAnalysisResult } from '../types';
 
 /** AI System Prompt */
@@ -90,7 +91,7 @@ export class AIAnalyzer {
    * 调用 LLM API
    */
   private async callAI(query: string, config: AIConfig): Promise<AIAnalysisResult> {
-    songloft.log.info(`[AIAnalyzer] Calling ${config.api_url} model=${config.model} timeout=${config.timeout}s`);
+    songloft.log.info(`[AIAnalyzer] Calling ${aiChatCompletionsUrl(config.api_url)} model=${config.model} timeout=${config.timeout}s`);
 
     const messages = [
       { role: 'system', content: AI_SYSTEM_PROMPT },
@@ -106,7 +107,7 @@ export class AIAnalyzer {
       extra_body: { reasoning_split: true },
     };
 
-    const fetchPromise = fetch(`${config.api_url}/chat/completions`, {
+    const fetchPromise = fetch(aiChatCompletionsUrl(config.api_url), {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${config.api_key}`,

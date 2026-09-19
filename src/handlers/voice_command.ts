@@ -6,6 +6,7 @@ import type { Router, HTTPRequest } from '@songloft/plugin-sdk';
 import { AccountManager } from '../account/manager';
 import { ConfigManager } from '../config/manager';
 import type { ConversationMessage, DeviceConfig } from '../types';
+import { aiModelsUrl, maskUrl } from '../utils/ai_url';
 import { AIAnalyzer } from '../voicecmd/ai_analyzer';
 import { VoiceEngine } from '../voicecmd/engine';
 
@@ -122,14 +123,15 @@ export function registerVoiceCommandHandlers(
 
   // GET /voice-commands/models - 获取可用模型列表（同时校验 API 连通性）
   router.get('/voice-commands/models', async (req: HTTPRequest) => {
+    let modelsUrl = '';
     try {
       const aiConfig = await configManager.getAIConfig();
       if (!aiConfig.api_url || !aiConfig.api_key) {
         return jsonResponse({ success: false, error: 'AI 配置不完整，请先填写 API 地址和密钥' });
       }
 
-      const modelsUrl = `${aiConfig.api_url}/v1/models`;
-      songloft.log.info(`[VoiceCommands] Fetching models from ${modelsUrl}`);
+      modelsUrl = aiModelsUrl(aiConfig.api_url);
+      songloft.log.info(`[VoiceCommands] Fetching models from ${maskUrl(modelsUrl)}`);
 
       const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(() => reject(new Error('模型列表获取超时')), (aiConfig.timeout || 6) * 1000);
@@ -183,7 +185,7 @@ export function registerVoiceCommandHandlers(
         return jsonResponse({ success: false, error: 'API Key 不正确或无权限' });
       }
       if (msg.includes('404') || msg.includes('not found')) {
-        return jsonResponse({ success: false, error: '接口不正确或未找到 /v1/models 端点' });
+        return jsonResponse({ success: false, error: `接口不正确或未找到 models 端点（请求地址：${maskUrl(modelsUrl)}）。部分服务不提供模型列表，可手动填写模型名。` });
       }
       return jsonResponse({ success: false, error: '获取模型列表失败：' + msg.slice(0, 200) });
     }
