@@ -720,7 +720,7 @@ async function deleteMemoryRecord(id?: string): Promise<void> {
         <SlIcon :name="memoryExpanded ? 'expand_less' : 'expand_more'" :size="20" />
       </button>
       <div v-if="memoryExpanded" class="sub-panel memory-list">
-        <div class="field"><label class="field-label">最大记忆数量（10-500）</label><SlInput :model-value="maxMemory" type="number" @update:model-value="maxMemory = $event" @change="saveNumber('voice_memory_max_records', maxMemory, 10, 500)" /></div>
+        <div class="field"><label class="field-label">自动学习记忆上限（10-5000）</label><SlInput :model-value="maxMemory" type="number" @update:model-value="maxMemory = $event" @change="saveNumber('voice_memory_max_records', maxMemory, 10, 5000)" /><p class="field-help">手动添加的别名不计入此上限，也不会被自动淘汰。</p></div>
         <div class="status-chips"><span class="chip">已保存 {{ state.memoryStats.recordCount || state.memoryStats.queryCount || 0 }} 条</span><span class="chip">已学习 {{ state.memoryStats.entityCount || 0 }} 首</span><span class="chip">本地命中 {{ state.memoryStats.localHitCount || state.memoryStats.hitCount || 0 }} 次</span></div>
         <div class="field-actions"><SlButton variant="text" label="刷新" icon="refresh" @click="ensureMemoryLoaded(true)" /><SlButton variant="text" label="清空全部" icon="delete_sweep" @click="clearMemory" /></div>
         <div class="memory-list-body">

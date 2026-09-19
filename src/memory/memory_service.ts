@@ -657,9 +657,11 @@ export class MemoryService {
   }
 
   private enforceLimit(records: Map<string, MemoryRecord>): number {
-    const overflow = records.size - this.maxRecords;
+    // 手动别名由用户显式维护：不计入上限，也不参与淘汰，避免自动池满时被挤掉。
+    const auto = Array.from(records.values()).filter(record => record.manualAlias !== true);
+    const overflow = auto.length - this.maxRecords;
     if (overflow <= 0) return 0;
-    const oldest = Array.from(records.values()).sort((a, b) => {
+    const oldest = auto.sort((a, b) => {
       const lastUsed = a.lastUsedAt.localeCompare(b.lastUsedAt);
       if (lastUsed !== 0) return lastUsed;
       const updated = a.updatedAt.localeCompare(b.updatedAt);
@@ -667,7 +669,7 @@ export class MemoryService {
       return a.createdAt.localeCompare(b.createdAt);
     }).slice(0, overflow);
     for (const record of oldest) records.delete(record.normalizedQuery);
-    songloft.log.info(`[MemoryService] evicted ${oldest.length} old record(s), limit=${this.maxRecords}`);
+    songloft.log.info(`[MemoryService] evicted ${oldest.length} old auto record(s), limit=${this.maxRecords}, manual aliases exempt`);
     return oldest.length;
   }
 

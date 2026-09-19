@@ -177,6 +177,19 @@ export async function runMemoryV2SelfTest(): Promise<MemoryV2SelfTestResult> {
   await evictionService.init();
   check('eviction_rebuilds_indexes', evictionService.count() === 10 && evictionService.getIndexStats().records === 10);
 
+  // 手动别名豁免：自动池满时只淘汰自动学习记录，用户显式维护的别名必须保留。
+  const manualAliasRecord = { ...record('manual-alias-1', '播放手动别名歌', '手动别名歌', '手动歌手', 900), manualAlias: true };
+  const mixedRecords = [
+    manualAliasRecord,
+    ...Array.from({ length: 12 }, (_, i) => record(`auto-${i}`, `播放自动歌${i}`, `自动歌${i}`, '自动歌手', 1000 + i)),
+  ];
+  const mixedService = new MemoryService(new InMemoryAdapter(mixedRecords), 10);
+  await mixedService.init();
+  check(
+    'manual_alias_exempt_from_eviction',
+    mixedService.findByQuery('播放手动别名歌')?.manualAlias === true && mixedService.count() === 11,
+  );
+
   const failedAdapter = new InMemoryAdapter([sunny]);
   const failedService = new MemoryService(failedAdapter);
   await failedService.init();

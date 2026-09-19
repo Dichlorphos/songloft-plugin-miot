@@ -115,3 +115,21 @@
 - 相关链接：`src/handlers/playlist_outcome.test.ts`、`node_modules/@songloft/plugin-sdk/dist/index.d.ts` 的 `HTTPRequest`
 - 复现记录：
   - 2026-09-19：把 `query` 传成对象即复现。
+
+### 2026-09-19 — Node.js 24 — 运行时自检脚本无法直接加载 memory 模块
+
+- 状态：open
+- 工具及版本：Node.js v24.21.0（原生类型剥离）+ `scripts/register-ts-hooks.mjs`
+- 环境：Windows 11 + 本项目仓库
+- 现象：直接执行 `node --import ./scripts/register-ts-hooks.mjs <script>.mjs` 调用 `runMemoryV2SelfTest()` 时，模块加载阶段整份报错，自检一条都不执行。
+- 原始错误：
+  - `SyntaxError [ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX]: TypeScript parameter property is not supported in strip-only mode`，指向 `src/memory/memory_resolver.ts:57` 的 `constructor(private readonly index: MemoryEntityIndex) {}`。
+- 根因：Node 原生类型剥离（strip-only）不支持 TS 参数属性（constructor parameter properties）。`src/memory/memory_resolver.ts` 使用了该语法，因此 memory 自检链无法在原生 Node 下加载。`npm test` 覆盖的测试目前不导入该文件，所以未暴露。
+- 解决方案或规避方案：
+  1. 需要跑 `runMemoryV2SelfTest()` 时，通过插件运行时或 `tsc` 编译产物执行，不要依赖 Node 原生 strip-only。
+  2. 若要纳入 `npm test`，需先把参数属性改为显式字段赋值（或用支持参数属性的编译/转译链）。
+- 验证：`node --import ./scripts/register-ts-hooks.mjs .codex-self-test.mjs` 必现上述错误；改用编译产物或插件内调用可绕过。
+- 相关链接：`src/memory/self_test.ts`、`src/memory/memory_resolver.ts`、`src/handlers/memory.ts`
+- 复现记录：
+  - 2026-09-19：为验证“手动别名豁免淘汰”新增自检断言后，本地直跑自检脚本时必现。
+
