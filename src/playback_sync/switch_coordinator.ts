@@ -10,7 +10,7 @@
 //
 // 跨账号切换、源与目标相同、设备组都不同步，只更新当前选择。
 
-import { PendingContextStore, type PendingContext } from './pending_store.ts';
+import { PendingContextStore, pendingKey, type PendingContext } from './pending_store.ts';
 import { PlaybackSnapshotStore, type PlaybackSnapshot } from './snapshot_store.ts';
 import type { SwitchSampleResult } from './recorder.ts';
 
@@ -141,8 +141,10 @@ export class SwitchCoordinator {
     }
 
     // 选择已经提交；后续同步失败不得回滚选择，也不得阻塞接口。
-    const key = `${accountId}:${targetDeviceId}`;
-    const generation = this.contentGenerations.get(key) ?? 0;
+    // 每次新选择也递增代际：同一目标连续两次选择时，先发任务的晚到 pending 不得覆盖后发任务。
+    const key = pendingKey(accountId, targetDeviceId);
+    const generation = (this.contentGenerations.get(key) ?? 0) + 1;
+    this.contentGenerations.set(key, generation);
     const task = this.runDeviceSelected(accountId, targetDeviceId, sourceDeviceId, generation).catch((e) => {
       this.log(`[SwitchCoordinator] device selection sync failed: ${String(e)}`);
       return { success: true, synced: false, reason: 'storage_error' } as SwitchResult;
@@ -166,7 +168,7 @@ export class SwitchCoordinator {
 
   /** 记录未完成的切换同步任务，供同目标的继续操作等待。 */
   private trackInFlight(accountId: string, targetDeviceId: string, task: Promise<unknown>): void {
-    const key = `${accountId}:${targetDeviceId}`;
+    const key = pendingKey(accountId, targetDeviceId);
     this.inFlight.set(key, task);
     void task.finally(() => {
       if (this.inFlight.get(key) === task) this.inFlight.delete(key);
@@ -175,7 +177,7 @@ export class SwitchCoordinator {
 
   /** 等待该目标未完成的切换同步任务；没有则立即返回。 */
   private async waitForInFlight(accountId: string, targetDeviceId: string): Promise<void> {
-    const task = this.inFlight.get(`${accountId}:${targetDeviceId}`);
+    const task = this.inFlight.get(pendingKey(accountId, targetDeviceId));
     if (task) await task.catch(() => undefined);
   }
 
@@ -248,7 +250,7 @@ export class SwitchCoordinator {
         snapshot: sampled,
         now: this.now(),
         // 锁内复查代际：clearPending 与本任务并发时，旧任务不得在清除之后重新落盘。
-        shouldWrite: () => (this.contentGenerations.get(`${accountId}:${targetDeviceId}`) ?? 0) === generation,
+        shouldWrite: () => (this.contentGenerations.get(pendingKey(accountId, targetDeviceId)) ?? 0) === generation,
       });
       if (!write.ok) {
         this.log(`[SwitchCoordinator] pending write skipped reason=${write.reason ?? 'unknown'}`);
@@ -319,7 +321,7 @@ export class SwitchCoordinator {
 
   /** 选择新内容时清除 pending，并使旧同步任务的晚到写入失效。 */
   async clearPending(accountId: string, targetDeviceId: string): Promise<void> {
-    const key = `${accountId}:${targetDeviceId}`;
+    const key = pendingKey(accountId, targetDeviceId);
     this.contentGenerations.set(key, (this.contentGenerations.get(key) ?? 0) + 1);
     try {
       await this.pendingStore.clear(accountId, targetDeviceId);

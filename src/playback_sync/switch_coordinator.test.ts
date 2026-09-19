@@ -325,6 +325,55 @@ test('设备选择提交后立即返回，慢采样仍在后台完成', async ()
   assert.ok(await pendingStore.read('acc1', 'devB', 10_000), '后台同步完成后应写入 pending');
 });
 
+test('同一目标连续选择时，先发任务的晚到 pending 不得覆盖后发', async () => {
+  const sources = ['devA', 'devX'];
+  let selectionIndex = 0;
+  const release: Array<() => void> = [];
+  const sampled = [
+    snapshot({ revision: 2, position_sec: 42 }),
+    snapshot({ revision: 3, position_sec: 55 }),
+  ];
+  let sampleIndex = 0;
+
+  const snapshotStorage = memoryStorage();
+  snapshotStorage.dump().playback_snapshot_v1 = JSON.stringify({
+    schema_version: 1,
+    snapshots: { acc1: snapshot() },
+  });
+  const pendingStore = new PendingContextStore(memoryStorage());
+  const coordinator = new SwitchCoordinator({
+    snapshotStore: new PlaybackSnapshotStore(snapshotStorage),
+    pendingStore,
+    now: () => 10_000,
+    getCurrentDevice: async () => sources[selectionIndex++],
+    setCurrentDevice: async () => {},
+    isGroupDevice: async () => false,
+    sampleOnSwitch: async () => {
+      const index = sampleIndex++;
+      await new Promise<void>((resolve) => release.push(resolve));
+      return { ok: true, snapshot: sampled[index] };
+    },
+    loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
+    playPlaylist: async () => 'succeeded',
+  });
+
+  const first = await coordinator.beginDeviceSelection('acc1', 'devB');
+  const second = await coordinator.beginDeviceSelection('acc1', 'devB');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(release.length, 2, '两个后台同步都应开始采样');
+
+  // 后发任务先落盘（新位置 55），先发任务后落盘（旧位置 42）必须被拒绝。
+  release[1]();
+  await second.sync;
+  release[0]();
+  await first.sync;
+
+  const pending = await pendingStore.read('acc1', 'devB', 10_000);
+  assert.ok(pending);
+  assert.equal(pending?.snapshot.revision, 3);
+  assert.equal(pending?.snapshot.position_sec, 55);
+});
+
 test('新内容清除后，旧同步任务晚到的 pending 不得回写', async () => {
   let current = 'devA';
   let releaseSample!: () => void;

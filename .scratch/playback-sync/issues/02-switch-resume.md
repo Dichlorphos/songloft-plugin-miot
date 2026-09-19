@@ -20,14 +20,14 @@ Blocked by: 01
 - 2026-09-13：已确认快照过期后，采样成功可创建新 revision；设备选择必须区分 pause/stop；前端测试路径修复与任务 01/02 纯逻辑、集成测试列为完成门槛。
 - 2026-09-13：已确认目标播放中切换不打断活动上下文；`toggle`/`resume` 优先待播放上下文；下发后未知结果保留原上下文；选择新内容使旧同步任务失效。
 - 2026-09-13：已确认下发结果使用 `succeeded`/`failed`/`unknown`；`unknown` 返回 `success:false` 与 `outcome:'unknown'`，不回滚、不自动重播、不清除待播放上下文。
-- 2026-09-13：已确认设备选择接口后台同步且始终成功返回；`toggle`/`resume`/播放接口返回 `outcome`；纯逻辑测试优先使用 Node 内置 `node:test`。
+- 2026-09-13：已确认设备选择接口的后台采样与待播放上下文同步失败不影响成功响应；`toggle`/`resume`/播放接口返回 `outcome`；纯逻辑测试优先使用 Node 内置 `node:test`。
 - 2026-09-13：已确认源设备取切换前当前选择；跨账号不共享快照；pending 首次写入起算 30 分钟；目标离线仍保存 pending，选择新内容立即清除并使旧任务失效。
 
 - 2026-09-19（框架复盘，已采纳）：切换入口确定为设备选择接口，源设备取请求开始时的当前选择再更新；原方案未指定该入口，而任务 01 只交付播放侧服务、接不到设备选择路径。
 - 2026-09-19（框架复盘，已采纳）：「选择新歌单或新歌曲即清除 pending」改在播放请求处理处生效，先于加载与起播。前端歌单选择只改本地状态，不构成后端可观测信号。
 - 2026-09-19（框架复盘，已采纳）：本任务交付待播放上下文存储，与任务 01 的播放快照存储分属两个模块与两个存储键。
 
-- 2026-09-19：实现完成。交付：pending_store（按账号+目标设备存一条、深拷贝不可变副本、30 分钟 TTL、去重不刷新、revision 防旧任务回写）；switch_coordinator（切换读源设备→采样→写 pending，源/目标相同、无源、设备组都跳过，切换接口始终成功）；host_deps（getPlayState 换算曲内位置、getById 取回歌曲、组判定、gracefulPlay 下发）；handlers 接线（/mina/last_selection 走切换、toggle 与显式 resume 优先消费 pending、PlaylistManager 内统一清除 pending）；账号删除同时清 pending。新增 31 个纯逻辑测试，总计 68 个通过。
+- 2026-09-19：实现完成。交付：pending_store（按账号+目标设备存一条、深拷贝不可变副本、30 分钟 TTL、去重不刷新、revision 防旧任务回写）；switch_coordinator（切换读源设备→采样→写 pending，源/目标相同、无源、设备组都跳过；后台同步失败不影响接口成功）；host_deps（getPlayState 换算曲内位置、getById 取回歌曲、组判定、gracefulPlay 下发）；handlers 接线（/mina/last_selection 走切换、toggle 与显式 resume 优先消费 pending、PlaylistManager 内统一清除 pending）；账号删除同时清 pending。新增 31 个纯逻辑测试，总计 68 个通过。
 - 2026-09-19：验收命令：npm test（68 通过）、npm run typecheck、node frontend/tests/run.mjs、npm run build 全部通过。
 - 2026-09-19：补充宿主集成测试（switch_integration.test.ts，6 例）：用内存 fake 替换 songloft 与 MinaService，装配真实 ConfigManager/PlaylistManagerMap/PlaylistManager，覆盖「切换不发控制命令」「切换用物理位置刷新快照」「继续才下发 URL 且带 seek、成功后清除 pending」「取不到歌曲不下发且保留」「歌单为空在加载阶段失败且保留」「任一侧属设备组完全跳过同步」。
 - 2026-09-19：为让集成测试可跑，新增 Node ESM 解析钩子（scripts/ts-resolve-hooks.mjs + register-ts-hooks.mjs），给旧模块的无扩展名相对导入补 .ts、并让裸 JSON 导入可加载；npm test 通过 --import 接入该钩子。player/manager 的 MinaService 改为 import type（仅作类型使用），剪掉测试时不需加载的 service→mina→miio→pako 依赖链。tsconfig.test.json 的 include 补上 src/types/*.d.ts，使宿主链的 pako 声明对测试可见。
@@ -41,3 +41,6 @@ Blocked by: 01
   - **「新内容清除 pending 未覆盖单曲直推」（复核为误报，未改代码）**：语音单曲直推与歌手歌单均经 playWithSongs（已挂 newContentHook）；eplayCurrent 重推的是**当前**歌曲而非「新歌单或新歌曲」，按规格第 46/71 行不该清除 pending。
 - 2026-09-19：spec 状态同步为 done（两个子票据均已完成实现与自动化验证）。真机验收仍未覆盖，done 不代表已通过真机。
 
+
+- 2026-09-19（两轴评审后采纳）：设备选择接口先同步提交当前选择，提交成功后再后台采样与写 pending；该响应契约经维护者确认，spec 第 57/70 行同步改写。未采用“选择写入失败仍返回成功”，因为前端在该响应后立即刷新状态，会读到旧设备。
+- 2026-09-19（两轴评审后采纳）：目标设备复合键统一复用 `pendingKey`；每次设备选择也递增同步代际，避免同一目标连续选择时先发任务的晚到 pending 覆盖后发任务。
