@@ -109,6 +109,45 @@ const LOOP_DETECT_MIN_ADVANCE_SEC = 10;
 /** position 落到该值以下视为回零（音箱从头重拉同一 URL） */
 const LOOP_DETECT_RESET_THRESHOLD_SEC = 3;
 
+/**
+ * 起播确认探测参数（songloft-org/songloft#466）。
+ *
+ * ubus `code=0` 只代表「云端把消息代理给了设备」，不代表设备真的拉到了流。
+ * 音源解析失败（例如 lxmusic 所有音源全崩，后端 /songs/{id}/play 返回 502）时，
+ * 音箱拉流失败会 TTS「播放失败，换一首试试吧」并停下——而 checkExternalStop 要 20s
+ * 才轮询一次、判定后走 stop() 只取消定时器不推进队列，表现为整个歌单彻底停摆。
+ * 这里在下发成功后另起一次「起播确认」：等设备起播缓冲窗口过去再回读 status/position，
+ * 两次仍读到 status!=1 就判为未起播，走 advanceToNext 直接跳下一首。
+ *
+ * 与 verifyPushLanded 的分工：那边在 ubus 报失败时救「假失败」（云端超时但设备实播），
+ * 这边在 ubus 报成功时抓「假成功」（云端应答成功但设备没起播）。节奏也刻意错开：
+ * 那边 1.2s×2 抢时效（要早于 advanceToNext 重试链），这边 10+8s 容忍慢网络与冷启动。
+ */
+const LANDING_VERIFY_FIRST_DELAY_MS = 10000;
+const LANDING_VERIFY_RETRY_DELAY_MS = 8000;
+const LANDING_VERIFY_ATTEMPTS = 2;
+
+/**
+ * 连续起播失败的熔断阈值：达到即停播并 TTS 提示，避免整个音源都挂时把整个歌单跳完。
+ * 计数在任何一次起播确认成功（status=1）后清零。
+ */
+const LANDING_FAILURE_CIRCUIT_BREAK = 3;
+
+/**
+ * 「外部停止 + 位置极早」→ 起播失败等价情形（#466）。
+ * checkExternalStop 确认外部停止时若 position 落在起播早期窗口内，语义等同「刚下发的
+ * 这首没真播上」，走 handleLandingFailure（跳下一首 + TTS）而不是 stop(false)。
+ * 起播确认漏网（首查恰好 status=1、随后 502）由这条兜住。
+ */
+const LANDING_EARLY_STOP_SEC = 15;
+
+/** 单首跳歌 TTS 文案 */
+const LANDING_FAILURE_TTS_TEXT = '这首歌暂时无法播放，为您切换下一首';
+/** 连续失败熔断 TTS 文案 */
+const LANDING_CIRCUIT_BREAK_TTS_TEXT = '当前多首歌曲无法播放，请稍后再试';
+/** 电台/单曲播放起播失败 TTS 文案（无「下一首」可跳，直接停播） */
+const LANDING_TERMINAL_FAILURE_TTS_TEXT = '当前歌曲暂时无法播放，请稍后再试';
+
 /** 判断 playlistId 是否为临时歌单 */
 export function isTempPlaylistId(id: number): boolean {
   return id < 0;
@@ -235,6 +274,9 @@ export class PlaylistManager {
   private resumePollHits: number = 0;   // 连续探测到设备"在播放"的次数
   private durationProbeTimer: any = null; // 定时器ID（duration==0 时兜底切歌探测，见 DURATION_PROBE_* 常量）
   private maxProbePosition: number = 0;   // 循环回零探测：本轮见过的最大设备 position，用于判定是否回零
+  private landingVerifyTimer: any = null; // 定时器ID（起播确认探测，见 LANDING_VERIFY_* 常量）
+  private landingFailureCount: number = 0; // 连续起播失败次数（#466 熔断），任何一次确认成功即清零
+  private unplayableSongIds: Set<number> = new Set(); // 预取失败的歌曲 id，advanceToNext 遇到直接再跳
   private totalSongs: number = 0;
   private playStartTimeMs: number = 0;  // 当前歌曲开始播放的时间戳(ms)
   private randomPlayed: Set<number> = new Set(); // 随机模式已播放索引
@@ -976,7 +1018,7 @@ export class PlaylistManager {
    *
    * 只探 2 次（最多 ~2.4s）：真续上的设备第一次就报 status=1；探失败的代价只是多一次带位置的重推
    * （听感是一下小卡顿），远小于让用户干等整首歌的静音。
-   * 只查主设备：分组成员各自的媒体上下文无法逐台补救，主设备没续上就整组重推 URL 对齐。
+   * 只查主设备：分组成员各自的媒体上下文无法逐台补救，主设备没续上就整组重推 URL 对���。
    * status 拿不到（-1，网络抖动 / 云端 502）时**按成功处理**——宁可少一次重推，也不要
    * 因为一次查询失败就把好端端在放的歌打断重来。
    *
@@ -1026,7 +1068,7 @@ export class PlaylistManager {
   /**
    * 获取当前播放位置（秒，曲内绝对位置）
    *
-   * 倍速下「墙钟经过秒数」不等于「曲内经过秒数」：1.5x 流播放 1 墙钟秒 = 1.5 曲内秒。
+   * 倍��下「墙钟经过秒数」不等于「曲内经过秒数」：1.5x 流播放 1 墙钟秒 = 1.5 曲内秒。
    * playStartTimeMs 在 playCurrent 里按 1/speed 反向缩放锚定（见那处的注释），
    * 这里要再按 speed 正向缩放回来，得到「从 seekSeconds 起、按 speed 倍速流逝」的曲内绝对位置。
    */
@@ -1447,10 +1489,133 @@ export class PlaylistManager {
 
     this.prefetchNextSong();
 
+    // 起播确认：ubus 报成功≠设备真的拉到了流（例如音源解析失败时后端 502，音箱拉不到会 TTS
+    // 「播放失败，换一首试试吧」并停下）。等一小段起播缓冲窗口后回读状态，未起播就跳下一首。
+    // 电台不启用：直播流可能长时间处于起播态（duration=0、缓冲慢），误跳无意义（#466）。
+    this.scheduleLandingVerify();
+
     // 状态机出口：起播成功。
     await this.captureSnapshot('playing');
 
     return true;
+  }
+
+  /**
+   * 起播确认（#466）：playCurrent 成功下发后延迟回读，确认设备真的进入播放。
+   *
+   * 电台、单曲播放模式不启用：电台会长时间处于起播态、singlePlay 没有下一首可跳。
+   * verifyPushLanded 已在此前把「假失败」判成功——那种情况设备真在播，起播确认能过；
+   * 我们要抓的是它抓不到的另一半：ubus 报成功但设备实际没起播。
+   */
+  private scheduleLandingVerify(): void {
+    const song = this.getCurrentSong();
+    if (!song || song.type === 'radio' || this.playMode === 'singlePlay') return;
+    const indexAtLanding = this.currentIndex;
+    const songIdAtLanding = song.id;
+
+    this.landingVerifyTimer = setTimeout(() => {
+      this.landingVerifyTimer = null;
+      this.verifyPlaybackLanded(indexAtLanding, songIdAtLanding, 0).catch(e => {
+        songloft.log.warn('[PlaylistManager] landing verify error: ' + String(e));
+      });
+    }, LANDING_VERIFY_FIRST_DELAY_MS);
+  }
+
+  /**
+   * 单轮起播确认。见 scheduleLandingVerify。
+   *
+   * @param indexAtLanding 起播时的 currentIndex，用于识别切歌
+   * @param songIdAtLanding 起播时的 song.id，索引可能因插入/删除而错位
+   * @param attempt 已完成的探测次数，达到 LANDING_VERIFY_ATTEMPTS 仍未起播则判定失败
+   */
+  private async verifyPlaybackLanded(indexAtLanding: number, songIdAtLanding: number, attempt: number): Promise<void> {
+    // 期间用户可能切歌/暂停/停止：交给触发那次操作的逻辑处理，这里不再插手
+    if (this.state !== 'playing' || this.currentIndex !== indexAtLanding) return;
+    if ((this.getCurrentSong()?.id ?? 0) !== songIdAtLanding) return;
+
+    let status = -1;
+    try {
+      const state = await this.minaService.getPlayState(this.accountId, this.deviceId);
+      status = state.status;
+    } catch (e) {
+      songloft.log.warn('[PlaylistManager] landing verify query failed: ' + String(e));
+      // 查询失败按「未确认」处理：真起播了下一轮会读到 status=1；两轮都读不到才判失败
+    }
+    if (this.state !== 'playing' || this.currentIndex !== indexAtLanding) return;
+    if ((this.getCurrentSong()?.id ?? 0) !== songIdAtLanding) return;
+
+    if (status === 1) {
+      // 起播成功：清零连续失败计数（熔断阈值只累计连续失败）
+      this.landingFailureCount = 0;
+      return;
+    }
+
+    const nextAttempt = attempt + 1;
+    if (nextAttempt < LANDING_VERIFY_ATTEMPTS) {
+      this.landingVerifyTimer = setTimeout(() => {
+        this.landingVerifyTimer = null;
+        this.verifyPlaybackLanded(indexAtLanding, songIdAtLanding, nextAttempt).catch(e => {
+          songloft.log.warn('[PlaylistManager] landing verify error: ' + String(e));
+        });
+      }, LANDING_VERIFY_RETRY_DELAY_MS);
+      return;
+    }
+
+    // 连续 LANDING_VERIFY_ATTEMPTS 次仍未起播：判定为起播失败，走跳歌
+    songloft.log.warn(`[PlaylistManager] Landing verify failed after ${LANDING_VERIFY_ATTEMPTS} attempts: status=${status}, treating as unplayable and advancing`);
+    // 记为「不可播放」：避免随机模式下 reserveNextIndex 再次抽中同一首、或用户切回时反复卡住
+    if (songIdAtLanding > 0) this.unplayableSongIds.add(songIdAtLanding);
+    // 上报后端：#466。当前用 played 端点 event=landing_failed；后端后续可据此做临时降权
+    // （例如全歌单播放时把这首放到末尾）。端点存在容错：后端未实现该 event 时忽略即可。
+    if (songIdAtLanding > 0) {
+      callHostAPI('POST', `/api/v1/songs/${songIdAtLanding}/played?source=miot&event=landing_failed`, undefined, { timeoutMs: 3000 }).catch(e => {
+        songloft.log.warn('[PlaylistManager] landing_failed notify failed: ' + String(e));
+      });
+    }
+    this.handleLandingFailure({ tts: true }).catch(e => {
+      songloft.log.error('[PlaylistManager] handleLandingFailure error: ' + String(e));
+    });
+  }
+
+  /**
+   * 起播失败/外部停止极早时的统一处理（#466）：
+   * - 累加连续失败计数；达到熔断阈值 → TTS 提示后 stop（走 startResumePoll 兜底自愈）
+   * - 未达阈值 → TTS「切换下一首」+ advanceToNext；无下一首 → TTS「稍后再试」后 stop
+   *
+   * TTS 与 advanceToNext 并发发送：不等 TTS 播完，音箱侧的「播放失败」提示已经出现在前，
+   * 让我们的提示紧跟其后即可；等 TTS 会多出 3-4s 静默，得不偿失。
+   * 分组只对主设备发 TTS（forEachTarget 只处理播放/暂停/停止，textToSpeech 本身按主设备发）。
+   */
+  private async handleLandingFailure(opts: { tts: boolean }): Promise<void> {
+    if (this.state !== 'playing') return;
+
+    this.landingFailureCount++;
+    // 熔断：连续多首无法起播 → 停播 + 长文案 TTS，让用户明确知道是音源问题而不是设备问题
+    if (this.landingFailureCount >= LANDING_FAILURE_CIRCUIT_BREAK) {
+      songloft.log.error(`[PlaylistManager] Landing failure circuit breaker tripped (count=${this.landingFailureCount}), stopping playback`);
+      this.landingFailureCount = 0;
+      if (opts.tts) {
+        void this.minaService.textToSpeech(this.accountId, this.deviceId, LANDING_CIRCUIT_BREAK_TTS_TEXT).catch(() => {});
+      }
+      await this.stop();
+      return;
+    }
+
+    // 电台/单曲播放无「下一首」语义：走终点式停播
+    const song = this.getCurrentSong();
+    if (song?.type === 'radio' || this.playMode === 'singlePlay') {
+      if (opts.tts) {
+        void this.minaService.textToSpeech(this.accountId, this.deviceId, LANDING_TERMINAL_FAILURE_TTS_TEXT).catch(() => {});
+      }
+      await this.stop();
+      return;
+    }
+
+    // 常规跳歌：先并发下发 TTS 再切歌
+    if (opts.tts) {
+      void this.minaService.textToSpeech(this.accountId, this.deviceId, LANDING_FAILURE_TTS_TEXT).catch(() => {});
+    }
+    await this.advanceToNext();
   }
 
   /**
@@ -1559,8 +1724,13 @@ export class PlaylistManager {
       try {
         await callHostAPI('GET', prefetchPath, undefined, { timeoutMs: 5000 });
         songloft.log.info(`[PlaylistManager] Prefetch next song index=${nextIdx} title=${title}${forceMp3 ? ' (mp3)' : ''}`);
+        // 预取成功清掉「不可播放」标记：URL 已能解析，之前的失败可能只是临时抖动（#466）
+        if (nextSong.id > 0) this.unplayableSongIds.delete(nextSong.id);
       } catch (e) {
-        songloft.log.warn('[PlaylistManager] Prefetch failed: ' + String(e));
+        // 预取失败大概率意味着音源解析失败（后端 502），把这首标记为「不可播放」，
+        // advanceToNext 遇到直接再跳，不占用起播确认的 18s 窗口（#466）。
+        if (nextSong.id > 0) this.unplayableSongIds.add(nextSong.id);
+        songloft.log.warn(`[PlaylistManager] Prefetch failed songId=${nextSong.id} title=${title}: ${String(e)}`);
       }
     })();
   }
@@ -1781,7 +1951,7 @@ export class PlaylistManager {
           return;
         }
       }
-      // status != 1 或未上报 position：不计入，等下一轮
+      // status != 1 或未上报 position���不计��，等下一轮
     } catch (e) {
       songloft.log.warn('[PlaylistManager] duration probe query failed: ' + String(e));
     }
@@ -1796,7 +1966,7 @@ export class PlaylistManager {
   }
 
   /**
-   * 安排下一次外部停止探测。每次重新校准自动切歌定时器（resetAutoNextTimer / 续播等）
+   * 安排下一次外部停止����测。每次重新校准自动切歌定时器（resetAutoNextTimer / 续播等）
    * 都会经 startCheckTimer 重走这里，探测计划随之刷新，与切歌定时器保持同源。
    */
   private scheduleStopPoll(remainingBudgetMs: number): void {
@@ -1842,6 +2012,16 @@ export class PlaylistManager {
         } else {
           this.stopPollMisses++;
           if (this.stopPollMisses >= EXTERNAL_STOP_CONFIRM_COUNT) {
+            // 外停发生在起播早期窗口内：语义等同「刚下发的这首没真播上」——语义与 verifyPlaybackLanded
+            // 判失败同源，直接走 handleLandingFailure：可跳歌就跳、电台/单曲播放就 TTS 停播（#466）。
+            // 起播确认漏网（首查恰好 status=1、随后 502）由这条兜住。
+            const song = this.getCurrentSong();
+            if (song && position >= 0 && position < LANDING_EARLY_STOP_SEC) {
+              songloft.log.warn(`[PlaylistManager] External stop early (status=${status}, position=${position}s), treating as landing failure`);
+              if (song.id > 0) this.unplayableSongIds.add(song.id);
+              await this.handleLandingFailure({ tts: true });
+              return;
+            }
             songloft.log.info(`[PlaylistManager] External stop confirmed (status=${status}, position=${position}s, misses=${this.stopPollMisses}), cancelling auto-next`);
             // 不向设备下发 stop：前提本就是「设备已经自己停了」，下发在判断正确时多余、
             // 判断错误时才是真正掐掉播放的那一刀。漏网的误判由 stop() 张开的外部恢复
@@ -1880,6 +2060,10 @@ export class PlaylistManager {
       this.durationProbeTimer = null;
     }
     this.maxProbePosition = 0;
+    if (this.landingVerifyTimer !== null) {
+      clearTimeout(this.landingVerifyTimer);
+      this.landingVerifyTimer = null;
+    }
   }
 
   // ===== 外部恢复探测（stopped 态检测设备恢复播放） =====
@@ -2029,7 +2213,23 @@ export class PlaylistManager {
 
     // 必须是 prefetchNextSong 预热过的那首（reserveNextIndex 已把两者锁到同一首），
     // 否则随机模式下播的永远是没预热的歌，开了音量均衡就要冷启动整首 loudnorm。
-    const nextIdx = this.reserveNextIndex();
+    // 跳过已知不可播放的歌（预取失败留下的标记，#466）：直接再定一首，最多 songs.length 次；
+    // 全歌单都不可播就当作没有下一首，避免把音箱推给一堆必然失败的 URL。
+    let nextIdx = this.reserveNextIndex();
+    let unplayableSkips = 0;
+    while (nextIdx >= 0 && this.unplayableSongIds.has(this.songs[nextIdx]?.id ?? 0)) {
+      if (unplayableSkips >= this.songs.length) {
+        songloft.log.warn(`[PlaylistManager] All ${this.songs.length} songs marked unplayable, stopping`);
+        nextIdx = -1;
+        break;
+      }
+      const skipped = this.songs[nextIdx];
+      songloft.log.info(`[PlaylistManager] Skipping known-unplayable song index=${nextIdx} id=${skipped?.id} title=${skipped?.title}`);
+      this.currentIndex = nextIdx;
+      this.clearPendingNextIndex();
+      nextIdx = this.reserveNextIndex();
+      unplayableSkips++;
+    }
     if (nextIdx < 0) {
       songloft.log.info('[PlaylistManager] No next song, playback complete');
       // 先抓结束位置再清锚点：lastStopPositionSec 可能还留着上一次停止的值。
@@ -2073,6 +2273,12 @@ export class PlaylistManager {
     }
 
     songloft.log.error('[PlaylistManager] Auto-next failed after retry, stopping');
+    // 熔断计数：多首连续硬失败达阈值时给用户 TTS 提示（#466）
+    this.landingFailureCount++;
+    if (this.landingFailureCount >= LANDING_FAILURE_CIRCUIT_BREAK) {
+      this.landingFailureCount = 0;
+      void this.minaService.textToSpeech(this.accountId, this.deviceId, LANDING_CIRCUIT_BREAK_TTS_TEXT).catch(() => {});
+    }
     this.state = 'stopped';
     this.playStartTimeMs = 0;
     // 自动切歌失败刻意不写快照：规范要求「自动切歌失败则保留上一条有效快照」。
