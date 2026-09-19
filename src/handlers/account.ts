@@ -5,7 +5,7 @@ import { jsonResponse, parseQuery } from '@songloft/plugin-sdk';
 import type { Router, HTTPRequest } from '@songloft/plugin-sdk';
 import { AccountManager } from '../account/manager';
 import { AuthService } from '../auth/service';
-import { getPlaybackRecorder } from '../playback_sync';
+import { getPlaybackRecorder, getPendingContextStore } from '../playback_sync';
 
 /** 解析请求体（兼容 Uint8Array 和 string） */
 function parseBody(req: HTTPRequest): any {
@@ -108,6 +108,8 @@ export function registerAccountHandlers(
       // 账号删除后清除播放快照：账号标识可能被复用，新账号不继承旧账号的播放上下文。
       // 放在账号删除之后、且失败不影响删除结果：清理是旁路。
       await getPlaybackRecorder().forgetAccount(accountId);
+      // 同时清除该账号的全部待播放上下文：账号 ID 可能被复用，新账号不继承旧队列。
+      await getPendingContextStore().removeAccount(accountId);
       return jsonResponse({ success: true, data: { message: 'account deleted' } });
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });

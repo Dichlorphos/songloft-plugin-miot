@@ -8,6 +8,7 @@ import { AccountManager } from '../account/manager';
 import { ConversationMonitor } from '../conversation/monitor';
 import { GroupCoordinator } from '../group/coordinator';
 import { updateDeviceStatusCache, getDeviceStatusCache, getOrFetchDeviceStatus, DEVICE_STATUS_TTL } from './playlist';
+import { getSwitchCoordinator } from '../playback_sync';
 
 /** 解析请求体（兼容 Uint8Array 和 string） */
 function parseBody(req: HTTPRequest): any {
@@ -261,10 +262,15 @@ export function registerDeviceHandlers(
       if (!device_id) {
         return jsonResponse({ success: false, error: 'device_id is required' });
       }
-      const ok = await minaService.updateLastSelection(account_id, device_id);
-      if (!ok) {
-        return jsonResponse({ success: false, error: 'failed to update last selection' });
+      // 切换入口：先读源设备、采样并写 pending，再更新当前选择。
+      // 设备选择本身始终成功，后台同步失败由日志和后续继续操作报告。
+      const coordinator = getSwitchCoordinator();
+      if (coordinator) {
+        void coordinator.onDeviceSelected(account_id, device_id).catch(e => songloft.log.warn('/mina/last_selection sync failed: ' + String(e)));
+      } else {
+        await minaService.updateLastSelection(account_id, device_id);
       }
+
       return jsonResponse({ success: true, data: { message: 'last selection updated', account_id, device_id } });
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });

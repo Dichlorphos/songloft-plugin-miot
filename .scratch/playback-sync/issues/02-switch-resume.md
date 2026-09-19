@@ -1,7 +1,7 @@
 # 切换设备播放上下文同步
 
 Type: task
-Status: ready-for-agent
+Status: done
 Blocked by: 01
 
 任务目标：基于任务 01 接入独立设备选择、待播放上下文和现有播放/语音控制流程。
@@ -26,3 +26,8 @@ Blocked by: 01
 - 2026-09-19（框架复盘，已采纳）：切换入口确定为设备选择接口，源设备取请求开始时的当前选择再更新；原方案未指定该入口，而任务 01 只交付播放侧服务、接不到设备选择路径。
 - 2026-09-19（框架复盘，已采纳）：「选择新歌单或新歌曲即清除 pending」改在播放请求处理处生效，先于加载与起播。前端歌单选择只改本地状态，不构成后端可观测信号。
 - 2026-09-19（框架复盘，已采纳）：本任务交付待播放上下文存储，与任务 01 的播放快照存储分属两个模块与两个存储键。
+
+- 2026-09-19：实现完成。交付：pending_store（按账号+目标设备存一条、深拷贝不可变副本、30 分钟 TTL、去重不刷新、revision 防旧任务回写）；switch_coordinator（切换读源设备→采样→写 pending，源/目标相同、无源、设备组都跳过，切换接口始终成功）；host_deps（getPlayState 换算曲内位置、getById 取回歌曲、组判定、gracefulPlay 下发）；handlers 接线（/mina/last_selection 走切换、toggle 与显式 resume 优先消费 pending、PlaylistManager 内统一清除 pending）；账号删除同时清 pending。新增 31 个纯逻辑测试，总计 68 个通过。
+- 2026-09-19：验收命令：npm test（68 通过）、npm run typecheck、node frontend/tests/run.mjs、npm run build 全部通过。
+
+

@@ -269,6 +269,10 @@ export class PlaylistManager {
   private announceOnSongChange: boolean = false;
   // 快照采集器。由 PlaylistManagerMap 注入；未注入时（如单测直接 new）不采集。
   private snapshotRecorder?: PlaybackRecorder;
+  // 新内容请求回调：播放新歌单/新歌曲前清除 pending 并使旧同步任务失效。
+  private newContentHook?: (accountId: string, deviceId: string) => Promise<void>;
+  // gracefulPlay 消费 pending 时置位，避免它自己把正在消费的 pending 清掉。
+  private suppressNewContentHook: boolean = false;
   // 停止前的位置。stop() 会把 pausedPositionSec 清零，快照要用清零前的值。
   private lastStopPositionSec: number = 0;
 
@@ -301,6 +305,21 @@ export class PlaylistManager {
     this.snapshotRecorder = recorder;
   }
 
+  /** 注入新内容请求回调；播放新歌单/新歌曲前会先调用它清除 pending。 */
+  setNewContentHook(hook: ((accountId: string, deviceId: string) => Promise<void>) | undefined): void {
+    this.newContentHook = hook;
+  }
+
+  /** 新内容请求：先清 pending 再加载/起播；gracefulPlay 消费 pending 时抑制。 */
+  private async notifyNewContent(): Promise<void> {
+    if (this.suppressNewContentHook || !this.newContentHook) return;
+    try {
+      await this.newContentHook(this.accountId, this.deviceId);
+    } catch (e) {
+      songloft.log.warn('[PlaylistManager] clear pending failed: ' + String(e));
+    }
+  }
+
   setAnnounceOnSongChange(enabled: boolean): void {
     this.announceOnSongChange = enabled;
   }
@@ -314,6 +333,7 @@ export class PlaylistManager {
    * @returns 是否成功
    */
   async play(playlistId: number, startIndex?: number, mode?: PlayMode, opts?: { randomStart?: boolean }): Promise<boolean> {
+    await this.notifyNewContent();
     // 立即停止定时器和重置状态，防止 loadPlaylistSongs 期间旧定时器触发 onSongFinished
     this.stopCheckTimer();
     this.state = 'idle';
@@ -375,6 +395,7 @@ export class PlaylistManager {
    * @returns 是否成功
    */
   async playPlaylistFromSong(playlistId: number, songId: number, mode?: PlayMode, fallbackIndex?: number): Promise<boolean> {
+    await this.notifyNewContent();
     // 立即停止定时器和重置状态，防止 loadPlaylistSongs 期间旧定时器触发 onSongFinished
     this.stopCheckTimer();
     this.state = 'idle';
@@ -422,11 +443,70 @@ export class PlaylistManager {
   }
 
   /**
+   * 从待播放上下文恢复：按 song_id 命中歌单内同一首才恢复位置，回退到其它歌曲从 0 开始。
+   *
+   * 与 playPlaylistFromSong 的区别：那条路只定位起始歌曲、不起播位置；恢复 pending 必须
+   * 带曲内位置，且只有命中原 ID 才允许带位置（规范「歌曲恢复按 ID、索引、首曲回退」）。
+   * 电台没有歌单，按单曲上下文直接播放，位置固定 0。
+   */
+  async gracefulPlay(playlistId: number, song: any, fallbackIndex: number, positionSec: number, mode: PlayMode, speed?: number): Promise<boolean> {
+    this.suppressNewContentHook = true;
+    try {
+      const isRadio = song?.type === 'radio';
+      const effectiveSpeed = isRadio ? 1 : (typeof speed === 'number' && speed > 0 ? speed : undefined);
+      if (isRadio || !Number.isInteger(playlistId) || playlistId <= 0) {
+        this.playbackSpeed = effectiveSpeed ?? this.playbackSpeed;
+        return await this.playWithSongs([song], 0, normalizePlayMode(mode), `单曲: ${song?.title ?? ''}`, '');
+      }
+
+      this.stopCheckTimer();
+      this.state = 'idle';
+      this.playStartTimeMs = 0;
+      this._lastLoadNotFound = false;
+
+      const loaded = await this.loadPlaylistSongs(playlistId);
+      if (!loaded) {
+        songloft.log.error(`[PlaylistManager] gracefulPlay: loadPlaylistSongs failed playlistId=${playlistId}`);
+        return false;
+      }
+      if (this.songs.length === 0) {
+        songloft.log.warn(`[PlaylistManager] gracefulPlay: empty playlist ${playlistId}`);
+        return false;
+      }
+
+      const matched = this.songs.findIndex(s => s.id === song?.id);
+      const hit = matched >= 0;
+      const startIndex = hit
+        ? matched
+        : (Number.isInteger(fallbackIndex) && fallbackIndex >= 0 && fallbackIndex < this.songs.length ? fallbackIndex : 0);
+      const seek = hit ? Math.max(0, positionSec) : 0;
+
+      this.playlistId = playlistId;
+      this.tempPlaylistName = '';
+      this.tempArtistQuery = '';
+      this.pendingTempArtist = '';
+      this.currentIndex = startIndex;
+      this.playMode = normalizePlayMode(mode);
+      this.randomPlayed = new Set();
+      this.clearPendingNextIndex();
+
+      const ok = await this.playCurrent({ seekSeconds: seek, speed: effectiveSpeed, skipAnnouncement: true });
+      if (!ok) return false;
+
+      await this.persistState();
+      return true;
+    } finally {
+      this.suppressNewContentHook = false;
+    }
+  }
+
+  /**
    * 播放预构建的歌曲列表（无需歌单ID）。
    * 用于"播放歌手XX的歌"等场景，将跨歌单收集的歌曲作为虚拟播放列表。
    * @param artistQuery - 歌手搜索词，用于重启后恢复
    */
   async playWithSongs(songs: Song[], startIndex: number, mode: PlayMode, label?: string, artistQuery?: string): Promise<boolean> {
+    await this.notifyNewContent();
     this.stopCheckTimer();
     this.state = 'idle';
     this.playStartTimeMs = 0;
@@ -2245,6 +2325,8 @@ export class PlaylistManagerMap {
   private configManager: ConfigManager;
   // 快照采集器：注入到每个新建 manager，由其状态机出口上报观测。未注入时不采集。
   private snapshotRecorder?: PlaybackRecorder;
+  // 新内容请求回调：由 main 注入，播放新歌单/新歌曲前清除 pending。
+  private newContentHook?: (accountId: string, deviceId: string) => Promise<void>;
 
   constructor(minaService: MinaService, configManager: ConfigManager) {
     this.minaService = minaService;
@@ -2256,6 +2338,14 @@ export class PlaylistManagerMap {
     this.snapshotRecorder = recorder;
     for (const manager of this.managers.values()) {
       manager.setSnapshotRecorder(recorder);
+    }
+  }
+
+  /** 注入新内容请求回调；对已存在的 manager 一并生效。 */
+  setNewContentHook(hook: ((accountId: string, deviceId: string) => Promise<void>) | undefined): void {
+    this.newContentHook = hook;
+    for (const manager of this.managers.values()) {
+      manager.setNewContentHook(hook);
     }
   }
 
@@ -2356,6 +2446,7 @@ export class PlaylistManagerMap {
     const manager = new PlaylistManager(primary.account_id, primary.device_id, this.minaService, this.configManager);
     manager.setTargets(targets);
     manager.setSnapshotRecorder(this.snapshotRecorder);
+    manager.setNewContentHook(this.newContentHook);
 
     // 从主设备配置恢复播放列表状态（本身不发设备指令）
     const resumeAnchor = await this.restoreFromConfig(manager, primary.account_id, primary.device_id);

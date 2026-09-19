@@ -14,7 +14,8 @@ import { AIAnalyzer } from './voicecmd/ai_analyzer';
 import { getDefaultVoiceCommands } from './voicecmd/engine';
 import { IndexingManager } from './indexing/manager';
 import { MemoryService } from './memory';
-import { getPlaybackRecorder } from './playback_sync';
+import { getPlaybackRecorder, getSnapshotStore, getPendingContextStore, setSwitchCoordinator, getSwitchCoordinator, SwitchCoordinator } from './playback_sync';
+import { sampleSourcePosition, loadSongById, isDeviceInGroup, playPendingContext } from './playback_sync/host_deps';
 
 // 导入所有handler注册函数
 import { registerAccountHandlers } from './handlers/account';
@@ -75,6 +76,7 @@ let conversationMonitor: ConversationMonitor;
 let voiceEngine: VoiceEngine;
 let indexingManager: IndexingManager;
 let memoryService: MemoryService;
+let switchCoordinator: SwitchCoordinator;
 
 async function onInit(): Promise<void> {
   songloft.log.info('MIoT 智能音箱插件初始化...');
@@ -90,6 +92,23 @@ async function onInit(): Promise<void> {
   playlistManagerMap = new PlaylistManagerMap(minaService, configManager);
   // 播放快照采集器：注入到播放管理器，由其状态机出口上报观测。
   playlistManagerMap.setSnapshotRecorder(getPlaybackRecorder());
+  // 新内容请求（网页/语音/定时任务）在加载与起播前清除 pending；于 PlaylistManager 内统一收口。
+  playlistManagerMap.setNewContentHook((accountId, deviceId) =>
+    getSwitchCoordinator()?.onNewContentRequested(accountId, deviceId) ?? Promise.resolve());
+  // 切换编排：设备选择写 pending 并采样源快照；继续播放优先消费 pending。
+  switchCoordinator = new SwitchCoordinator({
+    snapshotStore: getSnapshotStore(),
+    pendingStore: getPendingContextStore(),
+    getCurrentDevice: (accountId) => accountManager.getLastSelectedDevice(accountId),
+    setCurrentDevice: (accountId, deviceId) => minaService.updateLastSelection(accountId, deviceId).then(() => undefined),
+    isGroupDevice: (accountId, deviceId) => isDeviceInGroup(configManager, accountId, deviceId),
+    samplePosition: (accountId, deviceId) => sampleSourcePosition(playlistManagerMap.get(accountId, deviceId), minaService, accountId, deviceId),
+    loadSong: (songId) => loadSongById(songId),
+    playPlaylist: (accountId, targetDeviceId, playlistId, song, songIndex, positionSec, mode, speed) =>
+      playPendingContext(playlistManagerMap, accountId, targetDeviceId, playlistId, song, songIndex, positionSec, mode, speed),
+    log: (message) => songloft.log.warn(message),
+  });
+  setSwitchCoordinator(switchCoordinator);
   groupCoordinator = new GroupCoordinator(playlistManagerMap, minaService, configManager);
   // 加载分组快照，使 PlaylistManagerMap 能同步把分组设备解析到共享 manager（多房间共用一套播放列表）
   await playlistManagerMap.refreshGroups();
@@ -242,3 +261,4 @@ globalThis.onDeinit = onDeinit;
 globalThis.onQueryBusy = onQueryBusy;
 globalThis.onHTTPRequest = onHTTPRequest;
 globalThis.onWebSocket = onWebSocket;
+
