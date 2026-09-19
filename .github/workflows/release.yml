@@ -7,12 +7,8 @@ on:
         description: '版本号（留空则自动生成日期版本，格式：Y.M.D）'
         required: false
         default: ''
-  schedule:
-    # 每天北京时间 08:17（UTC 00:17）。此刻 UTC 日期与北京日期一致，版本号不会错位。
-    # 仅当「自上次发版以来有新提交」时才真正发版，见 gate job。
-    - cron: '17 0 * * *'
 
-# 串行化同名 workflow，避免 cron 与手动触发同时发同一个版本号。
+# 串行化同名 workflow，避免多次手动触发同时发同一个版本号。
 # 注意它防不住「别人往 main 推代码」——排队放行后 checkout 仍是各自触发时的 SHA，
 # 所以 bump 的 push 另有 rebase 重试兜底，见 release job 末尾。
 concurrency:
@@ -20,51 +16,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  gate:
-    runs-on: ubuntu-latest
-    outputs:
-      should_release: ${{ steps.check.outputs.should_release }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # 必须：默认 depth=1 且不拉 tag，git describe 会失败
-
-      - name: Check for new commits since last release
-        id: check
-        run: |
-          if [ "${{ github.event_name }}" != "schedule" ]; then
-            echo "手动触发，跳过门禁直接发版"
-            echo "should_release=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
-          if [ -z "$LAST_TAG" ]; then
-            echo "仓库尚无 tag，视为首次发版"
-            echo "should_release=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # 排除本 workflow 自己产生的 bump 提交，只数真实改动
-          COUNT="$(git log --oneline --invert-grep \
-                     --grep='^chore(release): bump to v' \
-                     "${LAST_TAG}..HEAD" | wc -l)"
-          echo "自 ${LAST_TAG} 以来的提交："
-          git log --oneline "${LAST_TAG}..HEAD"
-          echo "其中非发版提交数：${COUNT}"
-
-          if [ "$COUNT" -gt 0 ]; then
-            echo "should_release=true" >> $GITHUB_OUTPUT
-            echo "✅ 有 ${COUNT} 个新提交，继续发版" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "should_release=false" >> $GITHUB_OUTPUT
-            echo "⏭️ 自 ${LAST_TAG} 以来无新提交，跳过今日发版" >> $GITHUB_STEP_SUMMARY
-          fi
-
   release:
-    needs: gate
-    if: needs.gate.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
