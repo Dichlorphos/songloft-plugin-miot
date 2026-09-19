@@ -77,6 +77,8 @@ Status: done
 
 真机验收覆盖独立设备、设备组、目标播放中切换、快速切换、弱网/离线/unknown/超时、歌单或歌曲变化、重启和过期、特殊歌曲及旧 AI `stop`。
 
+真机验收清单与发布门禁见 [issues/03-manual-acceptance.md](issues/03-manual-acceptance.md)：该票据通过前，播放同步相关版本不得发布；它不阻塞与播放同步无耦合的后续开发。任何播放同步代码改动都必须重新确认该票据，受影响项重测或显式豁免。
+
 纯逻辑测试优先使用 Node 内置 `node:test` 和独立内存 fake，避免引入重量级测试框架。验证入口：
 
 - `npm test` 运行 `src/**/*.test.ts` 的纯逻辑测试。Node 24 原生剥离 TypeScript 类型，测试文件用 `.ts` 直接执行，因此相对导入必须带 `.ts` 扩展名（`tsconfig` 已开启 `allowImportingTsExtensions`）。
