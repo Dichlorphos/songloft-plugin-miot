@@ -12,12 +12,15 @@
 // 模型请求变成 `.../v1/v1/models` → 404，并被笼统提示为「端点不存在」，
 // 掩盖真实原因。
 
-/** 归一化为「已包含 /v1 前缀、无尾斜杠」的 base URL。 */
+/** 已知 OpenAI 兼容版本段：/v1（标准）~ /v4（智谱等）。 */
+const KNOWN_VERSION_SEG = /\/(v1|v2|v3|v4)$/i;
+
+/** 归一化为「已包含版本段前缀、无尾斜杠」的 base URL。 */
 export function normalizeAiBaseUrl(apiUrl: string): string {
   let u = (apiUrl || '').trim();
   if (!u) return '';
   u = u.replace(/\/+$/, '');
-  if (/\/v1$/i.test(u)) return u;
+  if (KNOWN_VERSION_SEG.test(u)) return u;
   return `${u}/v1`;
 }
 
