@@ -65,7 +65,7 @@ async function saveCurrent() {
   if (!global && !allManaged.value && !targetMembers.value.length) { notify('请至少选择一个目标设备', 'warning'); return; }
   try { await saveSchedule(task); editor.value = false; } catch (error) { notify(messageOf(error), 'error'); }
 }
-async function removeTask(id?: string) { if (!id || !(await confirmAction('删除定时任务', '删除后无法恢复。', '删除', true))) return; try { await deleteSchedule(id); } catch (error) { notify(messageOf(error), 'error'); } }
+async function removeTask(id?: string) { if (!id || !(await confirmAction('删除定时任务', '删除后无法恢复。', '删除', true)).confirmed) return; try { await deleteSchedule(id); } catch (error) { notify(messageOf(error), 'error'); } }
 async function toggle(task: ScheduledTask, enabled: boolean) { try { await toggleSchedule(task, enabled); } catch (error) { notify(messageOf(error), 'error'); } }
 </script>
 

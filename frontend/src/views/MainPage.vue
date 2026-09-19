@@ -11,7 +11,7 @@ import SlListView from '../ui/SlListView.vue';
 import SlSelect from '../ui/SlSelect.vue';
 import { openSelect } from '../ui/selectState';
 import { navigation, openPage } from '../runtime';
-import { currentDevice, deviceName, lastPlayedSong, messageOf, playlistLabel, playSong, refreshAll, resumePlaylist, selectPlaylist, state, visibleSongs } from '../store';
+import { confirmAction, currentDevice, deviceName, lastPlayedSong, messageOf, playlistLabel, playSong, refreshAll, removeSongFromPlaylist, resumePlaylist, selectPlaylist, state, visibleSongs } from '../store';
 import type { SelectOption, Song } from '../types';
 
 const search = ref('');
@@ -198,6 +198,22 @@ function openDevicePicker() {
 async function play(song: Song, index: number) {
   try { await playSong(song, index); } catch (error) { /* store already presents the error */ notifyLocal(error); }
 }
+// 临时歌单（id<0，语音「播放歌手X」生成的一次性队列）不落库，不允许删除。
+const songRemovable = computed(() => {
+  const id = Number(state.selectedPlaylistId);
+  return Number.isFinite(id) && id > 0;
+});
+async function removeSong(song: Song) {
+  const result = await confirmAction(
+    '从歌单删除',
+    `确定从当前歌单删除《${song.title || '未知歌曲'}》吗？`,
+    '删除',
+    true,
+    { label: '同时从曲库中永久删除歌曲文件', initial: false },
+  );
+  if (!result.confirmed) return;
+  try { await removeSongFromPlaylist(song, { fromLibrary: result.checked }); } catch (error) { notifyLocal(error); }
+}
 async function resume() {
   try { await resumePlaylist(); } catch (error) { /* store already presents the error */ notifyLocal(error); }
 }
@@ -313,7 +329,7 @@ onUnmounted(() => {
          避免窗口滑动时原生 ListView 的子节点索引整体错位。 -->
     <SlListView v-if="state.selectedPlaylistId && !state.songsLoading && !state.songsError" ref="listRef" aria-label="歌曲列表" @scroll="onListScroll">
       <div class="song-list-spacer" :style="{ height: `${leadSpacerHeight}px` }"></div>
-      <SongRow v-for="(song, index) in renderedSongs" :key="song.id" :song="song" :index="windowStart + index" @play="play" />
+      <SongRow v-for="(song, index) in renderedSongs" :key="song.id" :song="song" :index="windowStart + index" :removable="songRemovable" @play="play" @remove="removeSong" />
       <div class="song-list-spacer" :style="{ height: `${tailSpacerHeight}px` }"></div>
       <div v-if="totalSongs === 0" class="song-list-empty">没有匹配的歌曲</div>
     </SlListView>

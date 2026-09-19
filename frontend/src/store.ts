@@ -75,7 +75,12 @@ export interface ConfirmState {
   message: string;
   confirmText: string;
   dangerous: boolean;
-  resolve?: (value: boolean) => void;
+  /**
+   * 可选复选框：出现在确认对话框正文下方，勾选状态随 resolve 一起回传。
+   * 用于「是/否 + 要不要顺带做另一件事」的确认场景（如删歌时是否清曲库）。
+   */
+  checkbox?: { label: string; checked: boolean };
+  resolve?: (value: { confirmed: boolean; checked: boolean }) => void;
 }
 
 export const state = reactive({
@@ -197,16 +202,53 @@ export function confirmAction(
   message: string,
   confirmText = '确定',
   dangerous = false,
-): Promise<boolean> {
+  checkbox?: { label: string; initial?: boolean },
+): Promise<{ confirmed: boolean; checked: boolean }> {
   return new Promise((resolve) => {
-    state.confirm = { open: true, title, message, confirmText, dangerous, resolve };
+    state.confirm = {
+      open: true,
+      title,
+      message,
+      confirmText,
+      dangerous,
+      checkbox: checkbox ? { label: checkbox.label, checked: !!checkbox.initial } : undefined,
+      resolve,
+    };
   });
 }
 
 export function resolveConfirm(value: boolean): void {
-  state.confirm.resolve?.(value);
+  const checked = !!state.confirm.checkbox?.checked;
+  state.confirm.resolve?.({ confirmed: value, checked });
   state.confirm.open = false;
   state.confirm.resolve = undefined;
+  state.confirm.checkbox = undefined;
+}
+
+/**
+ * 从歌单删除一首歌。可选 `fromLibrary=true` 时同时从曲库永久删除。
+ *
+ * 音箱正播那首被删时，后端会先切下一首再摘除；前端只负责刷新本地歌曲列表和
+ * 播放状态（不重新拉整份进度：切换靠 status WS 推）。
+ */
+export async function removeSongFromPlaylist(song: Song, opts: { fromLibrary?: boolean } = {}): Promise<void> {
+  if (!state.selectedPlaylistId) throw new Error('请先选择歌单');
+  try {
+    await post('/player/song/remove', {
+      playlist_id: Number(state.selectedPlaylistId),
+      song_id: song.id,
+      from_library: !!opts.fromLibrary,
+      account_id: state.currentAccountId,
+      device_id: state.currentDeviceId,
+    });
+    state.songs = state.songs.filter((item) => item.id !== song.id);
+    notify(opts.fromLibrary ? '已从歌单和曲库删除' : '已从歌单删除', 'success');
+    void refreshPlayerStatus();
+    void refreshPlaylistProgress();
+  } catch (error) {
+    notify(messageOf(error), 'error');
+    throw error;
+  }
 }
 
 export async function loadConfig(): Promise<void> {
@@ -880,7 +922,7 @@ async function connectDevicesInBackground(): Promise<void> {
 export function disposeStore(): void {
   disconnectStatusStream();
   if (snackbarTimer) clearTimeout(snackbarTimer);
-  state.confirm.resolve?.(false);
+  state.confirm.resolve?.({ confirmed: false, checked: false });
 }
 
 export { messageOf };

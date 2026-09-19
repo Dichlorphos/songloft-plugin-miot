@@ -11,7 +11,7 @@ import SlIcon from '../ui/SlIcon.vue';
 import { closePage, navigation, notifyHostFavorite } from '../runtime';
 import { get, messageOf, post, query } from '../api';
 import type { SleepTimerStatus } from '../types';
-import { notify, playerCommand, seekPlayer, setPlayMode, setPlaybackSpeed, setVolume, state } from '../store';
+import { confirmAction, notify, playerCommand, seekPlayer, setPlayMode, setPlaybackSpeed, setVolume, state } from '../store';
 
 interface LyricLine { time: number; text: string }
 interface LyricPayload { lyric?: string; tlyric?: string; rlyric?: string; lxlyric?: string }
@@ -94,6 +94,43 @@ async function loadSongDetails(): Promise<void> {
   isFavorite.value = favoriteResult.status === 'fulfilled' && favoriteResult.value.is_favorited;
 }
 
+// 全屏播放器的「删除当前歌曲」入口。临时歌单（id<0）不落库，按钮不可用。
+// 要删的是当前正播那首，取自 player.playlist_id / player.current_song，
+// 而不是当前选中的歌单列表（用户可能开着另一个歌单在看）。
+const currentPlaylistId = computed(() => {
+  const id = Number(state.player.playlist_id);
+  return Number.isFinite(id) ? id : 0;
+});
+const canRemoveCurrent = computed(() => currentPlaylistId.value > 0 && !!state.player.current_song);
+async function removeCurrentSong(): Promise<void> {
+  const song = state.player.current_song;
+  const playlistId = currentPlaylistId.value;
+  if (!song || playlistId <= 0) return;
+  const result = await confirmAction(
+    '删除当前歌曲',
+    `确定从当前歌单删除《${song.title || '未知歌曲'}》吗？`,
+    '删除',
+    true,
+    { label: '同时从曲库中永久删除歌曲文件', initial: false },
+  );
+  if (!result.confirmed) return;
+  try {
+    // 这里直接调后端并接手错误提示：全屏播放器正播的歌单不一定是当前选中的那份。
+    await post('/player/song/remove', {
+      playlist_id: playlistId,
+      song_id: song.id,
+      from_library: result.checked,
+      account_id: state.currentAccountId,
+      device_id: state.currentDeviceId,
+    });
+    if (String(playlistId) === state.selectedPlaylistId) {
+      state.songs = state.songs.filter((item) => item.id !== song.id);
+    }
+    notify(result.checked ? '已从歌单和曲库删除' : '已从歌单删除', 'success');
+  } catch (error) {
+    notify(messageOf(error), 'error');
+  }
+}
 async function toggleFavorite(): Promise<void> {
   const id = state.player.current_song?.id;
   if (!id || favoriteBusy.value) return;
@@ -400,6 +437,7 @@ watch(activeLyric, centerActiveLyric);
               @set="setSleepTimer"
               @cancel="cancelSleepTimer"
             />
+            <SlButton variant="icon" icon="delete" player-icon class="player-tool-button" title="从歌单删除" :disabled="!canRemoveCurrent" @click="removeCurrentSong" />
             <SlButton variant="icon" icon="stop" player-icon class="player-tool-button" title="停止播放" :disabled="state.playerBusy" @click="playerCommand('/player/stop')" />
           </div>
         </div>
