@@ -82,6 +82,10 @@ export class SwitchCoordinator {
   private readonly now: () => number;
   // 每「账号:目标设备」最多一个未完成的切换同步任务；继续操作先等它落定。
   private readonly inFlight = new Map<string, Promise<unknown>>();
+  // 每个账号一条选择写入队列：把「读当前选择 → 写当前选择」串起来，
+  // 否则快速连续切换时后发请求可能读到尚未落盘的旧值，或先发的慢写入反过来覆盖新选择。
+  private readonly selectionQueues = new Map<string, Promise<unknown>>();
+
 
   constructor(deps: SwitchCoordinatorDeps) {
     this.snapshotStore = deps.snapshotStore;
@@ -128,22 +132,43 @@ export class SwitchCoordinator {
     if (task) await task.catch(() => undefined);
   }
 
+  /**
+   * 把一次选择提交串到该账号的队列尾部，前一个失败也照常执行下一个。
+   *
+   * 只包住「读当前选择 → 写当前选择」这段临界区：它是竞态的根源。采样与
+   * 写 pending 放在锁外，避免慢采样拖住后续切换；它们由 revision 规则兜底。
+   */
+  private enqueueSelection<T>(accountId: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.selectionQueues.get(accountId) ?? Promise.resolve();
+    const next = previous.then(task, task);
+    const queue = next.catch(() => undefined);
+    this.selectionQueues.set(accountId, queue);
+    void queue.finally(() => {
+      if (this.selectionQueues.get(accountId) === queue) this.selectionQueues.delete(accountId);
+    }).catch(() => undefined);
+    return next;
+  }
+
   private async runDeviceSelected(accountId: string, targetDeviceId: string): Promise<SwitchResult> {
     if (!accountId || !targetDeviceId) return { success: false, synced: false, reason: 'no_source' };
 
-    let sourceDeviceId: string | null = null;
-    try {
-      sourceDeviceId = await this.getCurrentDevice(accountId);
-    } catch (e) {
-      this.log(`[SwitchCoordinator] read current device failed: ${String(e)}`);
-    }
+    // 读源设备与写目标选择必须原子：两者之间若被其它选择请求插入，
+    // 既可能读到尚未落盘的旧值，也可能让先发的慢写入覆盖后来的新选择。
+    const sourceDeviceId = await this.enqueueSelection(accountId, async () => {
+      let source: string | null = null;
+      try {
+        source = await this.getCurrentDevice(accountId);
+      } catch (e) {
+        this.log(`[SwitchCoordinator] read current device failed: ${String(e)}`);
+      }
 
-    try {
-      await this.setCurrentDevice(accountId, targetDeviceId);
-    } catch (e) {
-      this.log(`[SwitchCoordinator] update current device failed: ${String(e)}`);
-    }
-
+      try {
+        await this.setCurrentDevice(accountId, targetDeviceId);
+      } catch (e) {
+        this.log(`[SwitchCoordinator] update current device failed: ${String(e)}`);
+      }
+      return source;
+    });
     if (!sourceDeviceId) return { success: true, synced: false, reason: 'no_source' };
     if (sourceDeviceId === targetDeviceId) return { success: true, synced: false, reason: 'same_device' };
 

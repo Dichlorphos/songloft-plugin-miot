@@ -270,3 +270,40 @@ test('暂停态切换不采样，沿用状态机出口写好的位置', async ()
   const pending = await store.read('acc1', 'devB', 10_000);
   assert.equal(pending?.snapshot.position_sec, 55);
 });
+
+test('快速连续切换按最新选择落定，源设备取上一个选择', async () => {
+  let current: string | null = 'devA';
+  const sources: Array<string | null> = [];
+  // 模拟存储写入耗时不同：先发的 devB 慢、后发的 devC 快，
+  // 没有串行化时慢的那次会最后落盘，把最新选择覆盖回旧设备。
+  const writeDelayMs: Record<string, number> = { devB: 40, devC: 5 };
+
+  const snapshotStorage = memoryStorage();
+  snapshotStorage.dump().playback_snapshot_v1 = JSON.stringify({
+    schema_version: 1,
+    snapshots: { acc1: snapshot() },
+  });
+  const pendingStore = new PendingContextStore(memoryStorage());
+
+  const coordinator = new SwitchCoordinator({
+    snapshotStore: new PlaybackSnapshotStore(snapshotStorage),
+    pendingStore,
+    now: () => 10_000,
+    getCurrentDevice: async () => { sources.push(current); return current; },
+    setCurrentDevice: async (_accountId, deviceId) => {
+      await new Promise((resolve) => setTimeout(resolve, writeDelayMs[deviceId] ?? 0));
+      current = deviceId;
+    },
+    isGroupDevice: async () => false,
+    samplePosition: async () => 42,
+    loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
+    playPlaylist: async () => 'succeeded',
+  });
+
+  const first = coordinator.onDeviceSelected('acc1', 'devB');
+  const second = coordinator.onDeviceSelected('acc1', 'devC');
+  await Promise.all([first, second]);
+
+  assert.equal(current, 'devC');
+  assert.deepEqual(sources, ['devA', 'devB']);
+});
