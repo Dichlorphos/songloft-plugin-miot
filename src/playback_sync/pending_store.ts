@@ -34,6 +34,8 @@ export interface PendingContextWrite {
   now: number;
   /** 写入时读到的 source_revision；传入则拒绝已被更新覆盖的旧任务。 */
   base_source_revision?: number;
+  /** 在写锁内、真正写入前复查任务是否仍有效；返回 false 时按 stale 拒绝。 */
+  shouldWrite?: () => boolean;
 }
 
 export interface PendingContextWriteResult {
@@ -133,6 +135,10 @@ export class PendingContextStore {
   private async writeLocked(request: PendingContextWrite): Promise<PendingContextWriteResult> {
     const envelope = (await this.loadEnvelope()) ?? this.emptyEnvelope();
     const key = pendingKey(request.account_id, request.target_device_id);
+    // 在写锁内部复查：clear() 与旧异步写入并发时，避免旧任务在清除之后重新落盘。
+    if (request.shouldWrite && !request.shouldWrite()) {
+      return { ok: false, reason: 'stale' };
+    }
     const existing = envelope.pending[key];
 
     // 旧异步任务：以过期基准提交的写入不得覆盖更新的上下文

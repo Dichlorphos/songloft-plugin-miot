@@ -108,4 +108,4 @@ export type {
   PendingContextStorage,
 } from './pending_store.ts';
 export { SwitchCoordinator } from './switch_coordinator.ts';
-export type { SwitchResult, ResumePendingResult, LoadedSong, SwitchCoordinatorDeps } from './switch_coordinator.ts';
+export type { SwitchResult, DeviceSelectionResult, ResumePendingResult, LoadedSong, SwitchCoordinatorDeps } from './switch_coordinator.ts';

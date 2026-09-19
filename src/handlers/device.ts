@@ -262,13 +262,19 @@ export function registerDeviceHandlers(
       if (!device_id) {
         return jsonResponse({ success: false, error: 'device_id is required' });
       }
-      // 切换入口：先读源设备、采样并写 pending，再更新当前选择。
-      // 设备选择本身始终成功，后台同步失败由日志和后续继续操作报告。
+      // 切换入口：先同步提交当前选择，确保响应返回时读设备状态已是新设备；
+      // 采样与 pending 写入在后台继续，同步失败由日志和后续继续操作报告。
       const coordinator = getSwitchCoordinator();
       if (coordinator) {
-        void coordinator.onDeviceSelected(account_id, device_id).catch(e => songloft.log.warn('/mina/last_selection sync failed: ' + String(e)));
+        const selected = await coordinator.beginDeviceSelection(account_id, device_id);
+        if (!selected.success) {
+          return jsonResponse({ success: false, error: 'failed to update last selection' });
+        }
       } else {
-        await minaService.updateLastSelection(account_id, device_id);
+        const ok = await minaService.updateLastSelection(account_id, device_id);
+        if (!ok) {
+          return jsonResponse({ success: false, error: 'failed to update last selection' });
+        }
       }
 
       return jsonResponse({ success: true, data: { message: 'last selection updated', account_id, device_id } });

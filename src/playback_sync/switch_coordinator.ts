@@ -21,6 +21,13 @@ export interface SwitchResult {
   reason?: 'no_source' | 'same_device' | 'cross_account' | 'group' | 'no_snapshot' | 'sampled' | 'storage_error';
 }
 
+/** 设备选择提交结果；选择写入成功即 true，完整同步任务由 sync 表示。 */
+export interface DeviceSelectionResult {
+  success: boolean;
+  /** 选择提交成功后启动的采样与 pending 写入任务；失败或无需同步时为 null。 */
+  sync: Promise<SwitchResult> | null;
+}
+
 /** 继续播放结果。`none` 表示没有可用的待播放上下文，调用方应回退目标原活动上下文。 */
 export interface ResumePendingResult {
   outcome: 'succeeded' | 'failed' | 'unknown' | 'none';
@@ -88,6 +95,8 @@ export class SwitchCoordinator {
   // 每个账号一条选择写入队列：把「读当前选择 → 写当前选择」串起来，
   // 否则快速连续切换时后发请求可能读到尚未落盘的旧值，或先发的慢写入反过来覆盖新选择。
   private readonly selectionQueues = new Map<string, Promise<unknown>>();
+  // 每个「账号:目标设备」一个同步任务代际；clearPending 递增使旧任务不能回写。
+  private readonly contentGenerations = new Map<string, number>();
 
 
   constructor(deps: SwitchCoordinatorDeps) {
@@ -104,20 +113,55 @@ export class SwitchCoordinator {
   }
 
   /**
-   * 设备选择入口。读取源设备 → 采样 → 更新当前选择 → 写 pending。
+   * 设备选择入口的同步提交阶段：读取源设备并更新当前选择，然后启动后台同步。
    *
-   * 从不抛出：切换本身必须始终成功返回，同步失败只记日志。源设备与目标相同、
-   * 跨账号、无源设备或任一侧为设备组时不创建同步任务。
+   * 该 Promise 只等到「当前选择」成功写入后 resolve；采样与写 pending 仍在后台执行，
+   * 由 `tryResumePending` 等待。这样接口返回后读取设备状态不会看到旧选择。
+   */
+  async beginDeviceSelection(accountId: string, targetDeviceId: string): Promise<DeviceSelectionResult> {
+    if (!accountId || !targetDeviceId) return { success: false, sync: null };
+
+    let sourceDeviceId: string | null = null;
+    try {
+      // 读源设备与写目标选择必须原子：两者之间若被其它选择请求插入，
+      // 既可能读到尚未落盘的旧值，也可能让先发的慢写入覆盖后来的新选择。
+      sourceDeviceId = await this.enqueueSelection(accountId, async () => {
+        let source: string | null = null;
+        try {
+          source = await this.getCurrentDevice(accountId);
+        } catch (e) {
+          this.log(`[SwitchCoordinator] read current device failed: ${String(e)}`);
+        }
+        await this.setCurrentDevice(accountId, targetDeviceId);
+        return source;
+      });
+    } catch (e) {
+      this.log(`[SwitchCoordinator] update current device failed: ${String(e)}`);
+      return { success: false, sync: null };
+    }
+
+    // 选择已经提交；后续同步失败不得回滚选择，也不得阻塞接口。
+    const key = `${accountId}:${targetDeviceId}`;
+    const generation = this.contentGenerations.get(key) ?? 0;
+    const task = this.runDeviceSelected(accountId, targetDeviceId, sourceDeviceId, generation).catch((e) => {
+      this.log(`[SwitchCoordinator] device selection sync failed: ${String(e)}`);
+      return { success: true, synced: false, reason: 'storage_error' } as SwitchResult;
+    });
+    this.trackInFlight(accountId, targetDeviceId, task);
+    return { success: true, sync: task };
+  }
+
+  /**
+   * 完整执行一次设备选择并等待同步完成。
+   *
+   * HTTP 入口用 `beginDeviceSelection`，避免采样拖慢响应；此方法保留给测试与需要
+   * 精确同步结果的调用方。
    */
   async onDeviceSelected(accountId: string, targetDeviceId: string): Promise<SwitchResult> {
-    const task = this.runDeviceSelected(accountId, targetDeviceId);
-    this.trackInFlight(accountId, targetDeviceId, task);
-    try {
-      return await task;
-    } catch (e) {
-      this.log(`[SwitchCoordinator] device selection sync failed: ${String(e)}`);
-      return { success: true, synced: false, reason: 'storage_error' };
-    }
+    const selected = await this.beginDeviceSelection(accountId, targetDeviceId);
+    if (!selected.success) return { success: false, synced: false, reason: 'storage_error' };
+    if (!selected.sync) return { success: true, synced: false, reason: 'no_source' };
+    return await selected.sync;
   }
 
   /** 记录未完成的切换同步任务，供同目标的继续操作等待。 */
@@ -152,26 +196,12 @@ export class SwitchCoordinator {
     return next;
   }
 
-  private async runDeviceSelected(accountId: string, targetDeviceId: string): Promise<SwitchResult> {
-    if (!accountId || !targetDeviceId) return { success: false, synced: false, reason: 'no_source' };
-
-    // 读源设备与写目标选择必须原子：两者之间若被其它选择请求插入，
-    // 既可能读到尚未落盘的旧值，也可能让先发的慢写入覆盖后来的新选择。
-    const sourceDeviceId = await this.enqueueSelection(accountId, async () => {
-      let source: string | null = null;
-      try {
-        source = await this.getCurrentDevice(accountId);
-      } catch (e) {
-        this.log(`[SwitchCoordinator] read current device failed: ${String(e)}`);
-      }
-
-      try {
-        await this.setCurrentDevice(accountId, targetDeviceId);
-      } catch (e) {
-        this.log(`[SwitchCoordinator] update current device failed: ${String(e)}`);
-      }
-      return source;
-    });
+  private async runDeviceSelected(
+    accountId: string,
+    targetDeviceId: string,
+    sourceDeviceId: string | null,
+    generation: number,
+  ): Promise<SwitchResult> {
     if (!sourceDeviceId) return { success: true, synced: false, reason: 'no_source' };
     if (sourceDeviceId === targetDeviceId) return { success: true, synced: false, reason: 'same_device' };
 
@@ -217,6 +247,8 @@ export class SwitchCoordinator {
         source_revision: sampled.revision,
         snapshot: sampled,
         now: this.now(),
+        // 锁内复查代际：clearPending 与本任务并发时，旧任务不得在清除之后重新落盘。
+        shouldWrite: () => (this.contentGenerations.get(`${accountId}:${targetDeviceId}`) ?? 0) === generation,
       });
       if (!write.ok) {
         this.log(`[SwitchCoordinator] pending write skipped reason=${write.reason ?? 'unknown'}`);
@@ -285,8 +317,10 @@ export class SwitchCoordinator {
     }
   }
 
-  /** 选择新内容时清除 pending，使未完成的同步任务失效。 */
+  /** 选择新内容时清除 pending，并使旧同步任务的晚到写入失效。 */
   async clearPending(accountId: string, targetDeviceId: string): Promise<void> {
+    const key = `${accountId}:${targetDeviceId}`;
+    this.contentGenerations.set(key, (this.contentGenerations.get(key) ?? 0) + 1);
     try {
       await this.pendingStore.clear(accountId, targetDeviceId);
     } catch (e) {

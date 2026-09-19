@@ -100,7 +100,11 @@ async function onInit(): Promise<void> {
     snapshotStore: getSnapshotStore(),
     pendingStore: getPendingContextStore(),
     getCurrentDevice: (accountId) => accountManager.getLastSelectedDevice(accountId),
-    setCurrentDevice: (accountId, deviceId) => minaService.updateLastSelection(accountId, deviceId).then(() => undefined),
+    // updateLastSelection 用 false 报告失败；选择提交必须显式失败，不能让接口误报成功。
+    setCurrentDevice: async (accountId, deviceId) => {
+      const ok = await minaService.updateLastSelection(accountId, deviceId);
+      if (!ok) throw new Error(`failed to update last selection: ${accountId}/${deviceId}`);
+    },
     isGroupDevice: (accountId, deviceId) => isDeviceInGroup(configManager, accountId, deviceId),
     // 采样与 2 秒超时归任务 01 暴露的 recorder.sampleOnSwitch，这里只提供源设备位置。
     sampleOnSwitch: (accountId, deviceId) => getPlaybackRecorder().sampleOnSwitch({

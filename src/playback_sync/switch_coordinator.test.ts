@@ -284,6 +284,82 @@ test('暂停态切换不采样，沿用状态机出口写好的位置', async ()
   assert.equal(pending?.snapshot.position_sec, 55);
 });
 
+test('设备选择提交后立即返回，慢采样仍在后台完成', async () => {
+  let current = 'devA';
+  let sampleStarted = false;
+  let releaseSample!: () => void;
+  const sampleGate = new Promise<void>((resolve) => { releaseSample = resolve; });
+
+  const snapshotStorage = memoryStorage();
+  snapshotStorage.dump().playback_snapshot_v1 = JSON.stringify({
+    schema_version: 1,
+    snapshots: { acc1: snapshot() },
+  });
+  const pendingStore = new PendingContextStore(memoryStorage());
+  const coordinator = new SwitchCoordinator({
+    snapshotStore: new PlaybackSnapshotStore(snapshotStorage),
+    pendingStore,
+    now: () => 10_000,
+    getCurrentDevice: async () => current,
+    setCurrentDevice: async (_accountId, deviceId) => { current = deviceId; },
+    isGroupDevice: async () => false,
+    sampleOnSwitch: async () => {
+      sampleStarted = true;
+      await sampleGate;
+      return { ok: true };
+    },
+    loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
+    playPlaylist: async () => 'succeeded',
+  });
+
+  const selection = await coordinator.beginDeviceSelection('acc1', 'devB');
+  assert.equal(selection.success, true);
+  assert.equal(current, 'devB', '选择必须先持久化再返回');
+  assert.equal(sampleStarted, false, 'beginDeviceSelection 不应等待后台采样');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(sampleStarted, true, '后台同步应已经启动');
+  assert.equal(await pendingStore.read('acc1', 'devB', 10_000), null, '采样未完成时 pending 尚未写入');
+
+  releaseSample();
+  assert.equal((await selection.sync)?.synced, true, '后台同步最终应完成');
+  assert.ok(await pendingStore.read('acc1', 'devB', 10_000), '后台同步完成后应写入 pending');
+});
+
+test('新内容清除后，旧同步任务晚到的 pending 不得回写', async () => {
+  let current = 'devA';
+  let releaseSample!: () => void;
+  const sampleGate = new Promise<void>((resolve) => { releaseSample = resolve; });
+
+  const snapshotStorage = memoryStorage();
+  snapshotStorage.dump().playback_snapshot_v1 = JSON.stringify({
+    schema_version: 1,
+    snapshots: { acc1: snapshot() },
+  });
+  const pendingStore = new PendingContextStore(memoryStorage());
+  const coordinator = new SwitchCoordinator({
+    snapshotStore: new PlaybackSnapshotStore(snapshotStorage),
+    pendingStore,
+    now: () => 10_000,
+    getCurrentDevice: async () => current,
+    setCurrentDevice: async (_accountId, deviceId) => { current = deviceId; },
+    isGroupDevice: async () => false,
+    sampleOnSwitch: async () => {
+      await sampleGate;
+      return { ok: true };
+    },
+    loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
+    playPlaylist: async () => 'succeeded',
+  });
+
+  const selection = await coordinator.beginDeviceSelection('acc1', 'devB');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await coordinator.onNewContentRequested('acc1', 'devB');
+  releaseSample();
+
+  assert.equal((await selection.sync)?.synced, false, '旧任务不得在清除后提交 pending');
+  assert.equal(await pendingStore.read('acc1', 'devB', 10_000), null, '旧上下文不得复活');
+});
+
 test('快速连续切换按最新选择落定，源设备取上一个选择', async () => {
   let current: string | null = 'devA';
   const sources: Array<string | null> = [];

@@ -151,6 +151,36 @@ test('过期待播放上下文按不存在处理', async () => {
   assert.equal(await store.read('acc1', 'dev2', 1_000 + PENDING_CONTEXT_TTL_MS + 1), null);
 });
 
+test('写锁内复查失效时会拒绝晚到写入', async () => {
+  const storage = memoryStorage();
+  const store = new PendingContextStore(storage);
+  let valid = true;
+
+  const result = await store.write({
+    account_id: 'acc1',
+    target_device_id: 'dev1',
+    source_revision: 5,
+    snapshot: snapshot(),
+    now: 1_000,
+    shouldWrite: () => valid,
+  });
+
+  valid = false;
+  const stale = await store.write({
+    account_id: 'acc1',
+    target_device_id: 'dev1',
+    source_revision: 6,
+    snapshot: snapshot({ revision: 6 }),
+    now: 2_000,
+    shouldWrite: () => valid,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(stale.ok, false);
+  assert.equal(stale.reason, 'stale');
+  assert.equal((await store.read('acc1', 'dev1', 2_000))?.source_revision, 5);
+});
+
 test('旧异步任务不得覆盖更新的待播放上下文', async () => {
   const store = new PendingContextStore(memoryStorage());
   await store.write({ account_id: 'acc1', target_device_id: 'dev2', source_revision: 5, snapshot: snapshot({ song_id: 1 }), now: 1_000 });
