@@ -151,7 +151,7 @@ export class AIAnalyzer {
    * reasoning_split=true 时 content 直接是干净 JSON，尝试直接解析
    * 解析失败则兜底：从内容中提取 JSON
    */
-  private parseResponse(content: string): AIAnalysisResult {
+  parseResponse(content: string): AIAnalysisResult {
     const trimmed = content.trim();
 
     // 优先尝试直接解析（reasoning_split=true 时 content 直接是 JSON）
@@ -169,9 +169,12 @@ export class AIAnalyzer {
       songloft.log.warn(`[AIAnalyzer] Direct JSON parse failed, content: ${content.slice(0, 300)}`);
     }
 
-    // 兜底：去掉思考标签后再提取 JSON
+    // 兜底：去掉思考标签与外层 markdown 代码块后再提取 JSON
     let cleaned = trimmed
-      .replace(/[\[\]/?]*(?:think|思考|THINK)[\[\]/?]*/gi, '');
+      .replace(/<(?:think|thought)>[\s\S]*?<\/(?:think|thought)>/gi, '')
+      .replace(/[\[\]<>/?]*(?:think|思考|THINK)[\[\]<>/?]*/gi, '')
+      .trim();
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
 
     const firstBrace = cleaned.indexOf('{');
     if (firstBrace === -1) {
@@ -179,26 +182,30 @@ export class AIAnalyzer {
     }
 
     let end = cleaned.lastIndexOf('}');
+    let jsonStr = '';
+    let parsed: any = null;
     while (end > firstBrace) {
-      const after = cleaned.slice(end + 1);
-      if (/^[\s]*$/.test(after)) break;
-      end = cleaned.lastIndexOf('}', end - 1);
+      try {
+        jsonStr = cleaned.slice(firstBrace, end + 1);
+        parsed = JSON.parse(jsonStr);
+        break;
+      } catch {
+        end = cleaned.lastIndexOf('}', end - 1);
+      }
     }
 
-    const jsonStr = cleaned.slice(firstBrace, end + 1);
-    try {
-      const parsed = JSON.parse(jsonStr);
-      return {
-        action: parsed.action || 'unknown',
-        params: parsed.params || {},
-        confidence: (parsed.confidence === 'high' || parsed.confidence === 'medium' || parsed.confidence === 'low')
-          ? parsed.confidence
-          : 'low',
-        rawText: parsed.rawText || '',
-      };
-    } catch {
+    if (!parsed || typeof parsed !== 'object') {
       songloft.log.warn(`[AIAnalyzer] Fallback JSON parse also failed, extracted: ${jsonStr.slice(0, 300)}`);
       throw new Error(`Failed to parse AI response: ${jsonStr.slice(0, 100)}`);
     }
+
+    return {
+      action: parsed.action || 'unknown',
+      params: parsed.params || {},
+      confidence: (parsed.confidence === 'high' || parsed.confidence === 'medium' || parsed.confidence === 'low')
+        ? parsed.confidence
+        : 'low',
+      rawText: parsed.rawText || '',
+    };
   }
 }
