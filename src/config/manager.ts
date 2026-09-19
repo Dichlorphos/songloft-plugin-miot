@@ -92,7 +92,7 @@ function defaultPluginConfig(): PluginConfig {
     play_announcement_delay: 3,
     play_announcement_scope: 'voice',
     conversation_poll_interval: 1,
-    conversation_poll_debug: false,
+    debug_log_enabled: false,
     smart_resume_timeout: 30,
     max_song_index: 10000,
     ai_config: defaultAIConfig(),
@@ -164,9 +164,25 @@ export class ConfigManager {
       this.configCache = this.load<Partial<PluginConfig>>(STORAGE_KEY_CONFIG, {});
     }
     const stored = await this.configCache;
+    // 旧字段 conversation_poll_debug 更名为 debug_log_enabled：只在新字段缺席时迁移旧值，
+    // 随后清空旧字段并落盘，防止后续再触发迁移。
+    const legacyPollDebug = (stored as any).conversation_poll_debug;
+    let migratedDebugLog = false;
+    if (stored.debug_log_enabled === undefined && typeof legacyPollDebug === 'boolean') {
+      stored.debug_log_enabled = legacyPollDebug;
+      migratedDebugLog = true;
+    }
+    if ('conversation_poll_debug' in (stored as Record<string, unknown>)) {
+      delete (stored as Record<string, unknown>).conversation_poll_debug;
+      migratedDebugLog = true;
+    }
     const merged = { ...defaultPluginConfig(), ...stored };
     merged.voice_memory_enabled = stored.voice_memory_enabled !== false;
     merged.voice_memory_max_records = normalizeMemoryMaxRecords(stored.voice_memory_max_records);
+    if (migratedDebugLog) {
+      await this.save(STORAGE_KEY_CONFIG, stored);
+      this.configCache = Promise.resolve(stored);
+    }
     // 旧单值外部搜索源迁移：sources 为空时合成为 legacy 源
     merged.external_search_sources = this.normalizeSearchSources(merged);
     // 旧单值字段（external_search_url/token，已 @deprecated）一次性别名迁移落盘：

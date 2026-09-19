@@ -28,7 +28,7 @@ const defaultConfig: MiotConfig = {
   suggested_addresses: [],
   conversation_monitor_enabled: false,
   conversation_poll_interval: 1,
-  conversation_poll_debug: false,
+  debug_log_enabled: false,
   voice_command_enabled: false,
   voice_memory_enabled: true,
   voice_memory_max_records: 100,

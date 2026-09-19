@@ -716,7 +716,7 @@ async function deleteMemoryRecord(id?: string): Promise<void> {
     <div class="form-body">
       <div class="field-grid">
         <div class="field"><label class="field-label">轮询间隔（秒）</label><SlInput :model-value="pollInterval" type="number" @update:model-value="pollInterval = $event" @change="saveNumber('conversation_poll_interval', pollInterval, 1, 30)" /></div>
-        <div class="field setting-field-control"><label class="field-label">调试日志</label><SlSwitch :model-value="state.config.conversation_poll_debug" @update:model-value="setSwitch('conversation_poll_debug', $event)" /></div>
+        <div class="field setting-field-control"><label class="field-label">调试日志</label><SlSwitch :model-value="state.config.debug_log_enabled" @update:model-value="setSwitch('debug_log_enabled', $event)" /></div>
       </div>
       <div v-if="state.config.conversation_monitor_enabled" class="status-panel status-panel-inset">
         <div class="status-chips"><span class="chip chip-success">{{ conversationSocket ? 'WebSocket 已连接' : '轮询回落中' }}</span><span class="chip" :class="managedDevices.length ? 'chip-success' : 'chip-warning'">{{ managedDevices.length }} 台受管理设备</span><span class="chip">{{ state.conversationMessages.length }} 条最近记录</span></div>

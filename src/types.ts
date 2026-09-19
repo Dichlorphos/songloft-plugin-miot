@@ -188,7 +188,7 @@ export interface PluginConfig {
   play_announcement_delay: number;
   play_announcement_scope: 'voice' | 'all';
   conversation_poll_interval: number;
-  conversation_poll_debug?: boolean; // 会话轮询调试日志开关，默认 false（稳态轮询不打冗余日志）
+  debug_log_enabled?: boolean; // 会话轮询调试日志开关，默认 false（稳态轮询不打冗余日志）
   smart_resume_timeout: number;
   max_song_index: number;
   ai_config: AIConfig;

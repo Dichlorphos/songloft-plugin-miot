@@ -8,7 +8,7 @@ import { AccountManager } from '../account/manager';
 import { ConfigManager } from '../config/manager';
 import type { ConversationMessage, AskMessage, WebhookConfig } from '../types';
 import { MinaHTTPClient } from '../mina/client';
-import { isPollDebug } from '../utils/debug';
+import { isDebugLog } from '../utils/debug';
 
 // ===== 常量 =====
 
@@ -366,14 +366,14 @@ export class ConversationMonitor {
     // 取记录失败：跳过本轮。既不动基线也不建基线——拿失败当「没有记录」去建基线，
     // 会让基线停在 0，等取记录恢复后整批历史对话被当成新消息重放
     if (askMessages === null) {
-      if (isPollDebug()) songloft.log.info(`[ConversationMonitor] pollDevice device=${dm.deviceId} fetch failed, skip round (primed=${dm.primed})`);
+      if (isDebugLog()) songloft.log.info(`[ConversationMonitor] pollDevice device=${dm.deviceId} fetch failed, skip round (primed=${dm.primed})`);
       return;
     }
 
     // 打印返回的消息数量和内容摘要（稳态无消息时不打，避免每 tick 构造字符串+刷屏）
     // localNowMs 一并打出，便于目测本地时钟与服务端时间戳的偏移
     const msgCount = askMessages.length;
-    if (isPollDebug() && msgCount > 0) {
+    if (isDebugLog() && msgCount > 0) {
       const summary = askMessages.map(m => {
         const q = m.response?.answer?.[0]?.question ?? '?';
         return `[ts=${m.timestamp_ms} q="${q.substring(0, 50)}"]`;
@@ -412,7 +412,7 @@ export class ConversationMonitor {
     }
 
     // 打印过滤结果（稳态无新消息时不打）
-    if (isPollDebug()) songloft.log.info(`[ConversationMonitor] pollDevice device=${dm.deviceId} after filter: ${newMessages.length} new (lastTimestampMs=${dm.lastTimestampMs})`);
+    if (isDebugLog()) songloft.log.info(`[ConversationMonitor] pollDevice device=${dm.deviceId} after filter: ${newMessages.length} new (lastTimestampMs=${dm.lastTimestampMs})`);
 
     if (newMessages.length === 0) {
       return;
