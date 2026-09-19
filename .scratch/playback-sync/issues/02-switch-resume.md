@@ -36,4 +36,8 @@ Blocked by: 01
   - **采样入口归一（两轴共同命中）**：任务 01 已暴露 PlaybackRecorder.sampleOnSwitch，但本任务在 switch_coordinator 里把「采样 + 2 秒超时 + revision 写入」又实现了一遍，且该入口在生产代码中从未被调用。现改为 coordinator 注入并调用 sampleOnSwitch，删除重复实现；SwitchSampleResult 增加可选 snapshot 以回传新 revision。新增 sample_entrypoint.test.ts 做防回归（含变异验证）。
   - **语音/AI resume 绕过 pending（Spec 硬要求缺口）**：VoiceEngine.executeResume 原先先判 hasPlaylist()，切到新设备后目标 manager 为空即播报「没有正在播放的内容」。现抽 oicecmd/resume_pending.ts，在 hasPlaylist 之前先消费 pending；pending 存在时无论 succeeded/failed/unknown 都不静默回退目标原上下文。
   - **标签集补齐（Standards 硬性）**：Status: done 原不在 triage-labels.md 的标签集内；按该文件「Edit the right-hand column to match whatever vocabulary you actually use」的约定补入 done，并注明它不代表真机验收已覆盖。
+- 2026-09-19：处理上轮评审暂缓的两条 Spec 发现。
+  - **outcome 契约补齐（成立，已修）**：规格第 70 行要求 	oggle、明确 resume 与实际播放接口返回 outcome，但 toggle 的普通暂停/恢复/重播分支与 /player/play 普通成功分支此前只返回 success/state。现四处统一补 outcome: 'succeeded'；新增 src/handlers/playlist_outcome.test.ts，用 SDK 真实 createRouter + 真实 HTTPRequest 驱动 handler（只替身 manager/mina/config），并做变异验证（移除 outcome 即变红）。
+  - **「新内容清除 pending 未覆盖单曲直推」（复核为误报，未改代码）**：语音单曲直推与歌手歌单均经 playWithSongs（已挂 newContentHook）；eplayCurrent 重推的是**当前**歌曲而非「新歌单或新歌曲」，按规格第 46/71 行不该清除 pending。
+- 2026-09-19：spec 状态同步为 done（两个子票据均已完成实现与自动化验证）。真机验收仍未覆盖，done 不代表已通过真机。
 

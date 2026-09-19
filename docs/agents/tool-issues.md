@@ -88,3 +88,30 @@
 - 相关链接：`src/playback_sync/index.ts` 的 `resetPlaybackRecorderForTest`、`src/playback_sync/switch_integration.test.ts`
 - 复现记录：
   - 2026-09-19：注释掉集成测试 `buildHarness` 中的 `resetPlaybackRecorderForTest()` 即复现。
+### 2026-09-19 — Node.js 24 — CJS 包（pako）具名导入在测试中失败
+
+- 状态：workaround
+- 工具及版本：Node.js v24.21.0；pako 1.0.11（CJS）
+- 环境：Windows 11；测试经 `scripts/register-ts-hooks.mjs` 钩子运行
+- 现象：测试导入 `src/miio/client.ts` 时进程在模块链接阶段就崩，一条用例都不执行。
+- 原始错误：`SyntaxError: The requested module 'pako' does not provide an export named 'ungzip'`
+- 根因：`pako` 是 CJS 包，Node 的具名导出探测（cjs-module-lexer）认不出 `ungzip`/`gzip` 等名字 —— `import('pako')` 只有 `default`，没有具名导出。打包器会做 CJS/ESM 互操作，所以 `import { ungzip } from 'pako'` 在生产构建里没问题，只有 Node 原生跑测试时才暴露。
+- 解决方案或规避方案：在 `scripts/ts-resolve-hooks.mjs` 的 `load` 里为 pako 的模块 URL 生成 shim：内部用 `createRequire` 取真实 `module.exports`，再显式 `export const ungzip = ...`。切勿在 shim 里 `import pako from '<自身 URL>'`——会造成自引用循环（`ReferenceError: Cannot access 'pako' before initialization`）。
+- 验证：`node --import ./scripts/register-ts-hooks.mjs --test src/handlers/playlist_outcome.test.ts` 从模块加载失败变为 4 条用例通过；`npm test` 86 通过。
+- 相关链接：`scripts/ts-resolve-hooks.mjs`、`src/miio/client.ts`
+- 复现记录：
+  - 2026-09-19：不带 pako shim 时导入 `src/handlers/playlist.ts`（间接依赖 `miio/client`）必现。
+
+### 2026-09-19 — Songloft SDK Router — 手写 HTTPRequest 导致 handler 报 q.split is not a function
+
+- 状态：resolved
+- 工具及版本：`@songloft/plugin-sdk` 2.15.0（`createRouter` / `jsonResponse` / `parseQuery`）
+- 环境：Node.js v24.21.0 测试
+- 现象：用真实 `createRouter` 驱动 handler 做契约测试时，所有用例返回 `{"success":false,"error":"q.split is not a function"}`，看起来像业务失败，实为请求对象构造错误。
+- 原始错误：`{"success":false,"error":"q.split is not a function"}`
+- 根因：误以为 `HTTPRequest.query` 是 `Record<string,string>` 而传了 `{}`；SDK 类型里 `query: string`、`body: Uint8Array | null`，`parseQuery` 内部对字符串调 `split`。
+- 解决方案或规避方案：构造请求时 `query: ''`，`body: new TextEncoder().encode(JSON.stringify(payload))`；读响应时 `HTTPResponse.body` 同样是字节，用 `new TextDecoder().decode(res.body)` 再 `JSON.parse`。
+- 验证：修正后 4 条 handler 契约用例全绿。
+- 相关链接：`src/handlers/playlist_outcome.test.ts`、`node_modules/@songloft/plugin-sdk/dist/index.d.ts` 的 `HTTPRequest`
+- 复现记录：
+  - 2026-09-19：把 `query` 传成对象即复现。

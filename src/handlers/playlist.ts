@@ -495,6 +495,7 @@ export function registerPlaylistHandlers(
         success: true,
         data: {
           message: 'playlist started',
+          outcome: 'succeeded',
           playlist_id: playlistId,
           play_mode: mode,
           // 前端据此纠正高亮/列表：与请求的 start_index 不一致说明本地列表已过期
@@ -552,7 +553,7 @@ export function registerPlaylistHandlers(
         const lastPosition = manager.getStatus().position;
         await manager.pause();
         updateDeviceStatusCache(account_id, device_id, { state: 'paused', position: lastPosition });
-        return jsonResponse({ success: true, data: { message: 'playlist paused', state: 'paused' } });
+        return jsonResponse({ success: true, data: { message: 'playlist paused', state: 'paused', outcome: 'succeeded' } });
       }
 
       // 目标未播放：优先消费有效 pending；没有 pending 才使用目标原活动上下文。
@@ -588,6 +589,7 @@ export function registerPlaylistHandlers(
             data: {
               message: 'playlist resumed',
               state: 'playing',
+              outcome: 'succeeded',
               current_song: manager.getCurrentSong(),
             },
           });
@@ -629,6 +631,7 @@ export function registerPlaylistHandlers(
         data: {
           message: 'playlist resumed',
           state: 'playing',
+          outcome: 'succeeded',
           current_song: manager.getCurrentSong(),
         },
       });

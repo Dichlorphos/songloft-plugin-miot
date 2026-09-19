@@ -1,6 +1,6 @@
 # 音响切换同步需求
 
-Status: ready-for-agent
+Status: done
 
 ## 代码基线
 
