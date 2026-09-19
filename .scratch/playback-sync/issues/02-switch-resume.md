@@ -29,5 +29,7 @@ Blocked by: 01
 
 - 2026-09-19：实现完成。交付：pending_store（按账号+目标设备存一条、深拷贝不可变副本、30 分钟 TTL、去重不刷新、revision 防旧任务回写）；switch_coordinator（切换读源设备→采样→写 pending，源/目标相同、无源、设备组都跳过，切换接口始终成功）；host_deps（getPlayState 换算曲内位置、getById 取回歌曲、组判定、gracefulPlay 下发）；handlers 接线（/mina/last_selection 走切换、toggle 与显式 resume 优先消费 pending、PlaylistManager 内统一清除 pending）；账号删除同时清 pending。新增 31 个纯逻辑测试，总计 68 个通过。
 - 2026-09-19：验收命令：npm test（68 通过）、npm run typecheck、node frontend/tests/run.mjs、npm run build 全部通过。
-
+- 2026-09-19：补充宿主集成测试（switch_integration.test.ts，6 例）：用内存 fake 替换 songloft 与 MinaService，装配真实 ConfigManager/PlaylistManagerMap/PlaylistManager，覆盖「切换不发控制命令」「切换用物理位置刷新快照」「继续才下发 URL 且带 seek、成功后清除 pending」「取不到歌曲不下发且保留」「歌单为空在加载阶段失败且保留」「任一侧属设备组完全跳过同步」。
+- 2026-09-19：为让集成测试可跑，新增 Node ESM 解析钩子（scripts/ts-resolve-hooks.mjs + register-ts-hooks.mjs），给旧模块的无扩展名相对导入补 .ts、并让裸 JSON 导入可加载；npm test 通过 --import 接入该钩子。player/manager 的 MinaService 改为 import type（仅作类型使用），剪掉测试时不需加载的 service→mina→miio→pako 依赖链。tsconfig.test.json 的 include 补上 src/types/*.d.ts，使宿主链的 pako 声明对测试可见。
+- 2026-09-19：验收命令：npm test（75 通过，含 6 条宿主集成）、npm run typecheck、node frontend/tests/run.mjs、npm run build 全部通过。构建产物 hash 与改动前一致，确认 import type 与测试钩子不影响打包。
 

@@ -5,7 +5,7 @@
 /// <reference types="@songloft/plugin-sdk" />
 
 import { ConfigManager, playlistProgressScope } from '../config/manager';
-import { MinaService } from '../service/service';
+import type { MinaService } from '../service/service';
 import { URLBuilder, playbackOptionsOf, playbackOptionsFromConfig } from './url_builder';
 import { getHostBaseUrl, callHostAPI } from '../utils/http';
 import type { PlayState, PlayMode, PlayerStatus, DeviceTargetRef, DeviceGroup } from '../types';
