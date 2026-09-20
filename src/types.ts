@@ -314,6 +314,8 @@ export interface AIAnalysisResult {
     duration?: number;
     /** sleep_timer：定时停止的曲目数 */
     songs_count?: number;
+    /** play_index：跳到当前歌单的第 N 首（1 起） */
+    index?: number;
   };
   /** AI 置信度 */
   confidence: 'high' | 'medium' | 'low';

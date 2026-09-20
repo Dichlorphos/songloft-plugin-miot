@@ -484,7 +484,14 @@ export class ConfigManager {
     if (commands.length === 0) {
       return getDefaultVoiceCommands();
     }
-    return commands;
+    // 老用户升级后补齐新增的默认口令（如 play_index、sleep_timer 系列），
+    // 用 type+param 组合去重：set_play_mode 一个 type 对应多个默认条目（random/single/…），
+    // 必须按 param 区分才不会把兄弟条目一起判为"已存在"。仅在读取时合并，不写回存储，
+    // 用户下次在设置页保存时才落盘。
+    const defaults = getDefaultVoiceCommands();
+    const seen = new Set(commands.map(c => `${c.type}::${c.param ?? ''}`));
+    const missing = defaults.filter(d => !seen.has(`${d.type}::${d.param ?? ''}`));
+    return missing.length > 0 ? [...commands, ...missing] : commands;
   }
 
   /** 保存语音口令配置 */

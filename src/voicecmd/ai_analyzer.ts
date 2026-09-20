@@ -13,6 +13,7 @@ const AI_SYSTEM_PROMPT = `从指令中提取出操作和音乐信息，返回JSO
 - play_song: name(歌曲名), artist(歌手名)
 - play_artist: artist(歌手名)
 - play_playlist: playlist(歌单名)
+- play_index: index(整数,从1起,跳到当前歌单的第N首)
 - set_play_mode: mode=order|random|single|loop|singlePlay(播放模式，singlePlay 表示当前歌曲播完停止)
 - favorite: action=add|remove(收藏/取消收藏当前歌曲)
 - sleep_timer: duration(分钟数,整数)或songs_count(曲目数,整数)，两者只填一个。定时停止播放。
@@ -47,7 +48,9 @@ const AI_SYSTEM_PROMPT = `从指令中提取出操作和音乐信息，返回JSO
 取消定时→{"action":"cancel_sleep_timer","params":{},"confidence":"high","rawText":"取消定时"}
 还有多久停→{"action":"query_sleep_timer","params":{},"confidence":"high","rawText":"还有多久停"}
 继续播放→{"action":"resume","params":{},"confidence":"high","rawText":"继续播放"}
-恢复播放→{"action":"resume","params":{},"confidence":"high","rawText":"恢复播放"}`;
+恢复播放→{"action":"resume","params":{},"confidence":"high","rawText":"恢复播放"}
+播放第300首→{"action":"play_index","params":{"index":300},"confidence":"high","rawText":"播放第300首"}
+跳到第五十首→{"action":"play_index","params":{"index":50},"confidence":"high","rawText":"跳到第50首"}`;
 
 /**
  * AI 口令分析器

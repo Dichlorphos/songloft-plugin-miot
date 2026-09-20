@@ -630,6 +630,33 @@ export class PlaylistManager {
   }
 
   /**
+   * 跳到当前歌单/临时列表的第 index 首（0 起）。
+   * 不重载歌单、不改播放模式，仅移动 currentIndex 并 playCurrent；
+   * 越界或没有歌单时返回 false，由调用方决定给不给 TTS。
+   */
+  async playAtIndex(index: number): Promise<boolean> {
+    this.stopCheckTimer();
+    if (this.songs.length === 0) {
+      songloft.log.warn('[PlaylistManager] playAtIndex: no playlist loaded');
+      return false;
+    }
+    if (index < 0 || index >= this.songs.length) {
+      songloft.log.warn(`[PlaylistManager] playAtIndex: index ${index} out of range (total=${this.songs.length})`);
+      return false;
+    }
+    // 已定好的下一首是按旧下标算的，跳位后必须作废重算，避免自动切歌时又跳回去。
+    this.clearPendingNextIndex();
+    this.currentIndex = index;
+    this.state = 'idle';
+    this.playStartTimeMs = 0;
+    const ok = await this.playCurrent();
+    if (ok) {
+      await this.persistState();
+    }
+    return ok;
+  }
+
+  /**
    * 设置播放模式
    */
   async setPlayMode(mode: PlayMode): Promise<void> {
@@ -760,6 +787,13 @@ export class PlaylistManager {
    */
   hasPlaylist(): boolean {
     return this.songs.length > 0;
+  }
+
+  /**
+   * 当前歌单/临时列表的歌曲总数
+   */
+  getTotalSongs(): number {
+    return this.songs.length;
   }
 
   /**
