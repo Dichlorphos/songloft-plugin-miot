@@ -120,6 +120,7 @@ const COMMAND_PRIORITY: Record<string, number> = {
   'sleep_timer': 7,
   'cancel_sleep_timer': 7,
   'query_sleep_timer': 7,
+  'pause': 8,
   'stop': 8,
 };
 
@@ -135,9 +136,10 @@ const INDEX_READY_WAIT_MS = 5000;
 /** 本地独立歌曲 URL 健康检查超时（ms），利用 TTS 播报窗口期异步验证，不增加用户感知延迟。 */
 const URL_HEALTH_CHECK_TIMEOUT_MS = 3000;
 
-const FIXED_CONTROL_COMMAND_TYPES = new Set(['set_play_mode', 'set_volume', 'favorite', 'next', 'previous', 'stop', 'sleep_timer', 'cancel_sleep_timer', 'query_sleep_timer']);
+const FIXED_CONTROL_COMMAND_TYPES = new Set(['set_play_mode', 'set_volume', 'favorite', 'next', 'previous', 'pause', 'stop', 'sleep_timer', 'cancel_sleep_timer', 'query_sleep_timer']);
 const SEARCH_COMMAND_TYPES = new Set(['play_song', 'play_playlist', 'play_artist']);
-const BUILTIN_STOP_KEYWORDS = ['暂停播放', '停止播放', '暂停音乐', '停一下', 'pause', 'stop', '暂停'];
+const BUILTIN_PAUSE_KEYWORDS = ['暂停播放', '暂停音乐', '暂停', 'pause'];
+const BUILTIN_STOP_KEYWORDS = ['停止播放', '停一下', 'stop', '停止'];
 
 /**
  * 有界跳字子序列匹配：在 query 的 rune 数组中按序查找关键词，允许中间插入有限字符。
@@ -721,14 +723,23 @@ export class VoiceEngine {
   // ===== 私有方法 - 口令匹配 =====
 
   private matchBuiltinStopCommand(query: string): MatchResult | null {
+    // 兜底匹配同时覆盖 pause 与 stop：用户即使禁用了相应口令，也要保证「暂停/停止」
+    // 这类基本控制可用。命中最长的那个关键词，并按它属于哪一组决定动作类型
+    //（规格第 62 行要求两者区分，不能一律当 stop）。
     const normalizedQuery = query.toLowerCase();
-    const keyword = BUILTIN_STOP_KEYWORDS
+    const all = [...BUILTIN_PAUSE_KEYWORDS, ...BUILTIN_STOP_KEYWORDS];
+    const keyword = all
       .filter(item => normalizedQuery.includes(item))
       .sort((a, b) => Array.from(b).length - Array.from(a).length)[0];
     if (!keyword) return null;
 
+    const isPause = BUILTIN_PAUSE_KEYWORDS.includes(keyword);
     return {
-      command: { type: 'stop', keywords: BUILTIN_STOP_KEYWORDS, enabled: true },
+      command: {
+        type: isPause ? 'pause' : 'stop',
+        keywords: isPause ? BUILTIN_PAUSE_KEYWORDS : BUILTIN_STOP_KEYWORDS,
+        enabled: true,
+      },
       keyword,
       argument: '',
     };
@@ -849,6 +860,9 @@ export class VoiceEngine {
       case 'previous':
         await this.executePrevious(accountId, deviceId);
         break;
+      case 'pause':
+        await this.executePause(accountId, deviceId);
+        break;
       case 'stop':
         await this.executeStop(accountId, deviceId);
         break;
@@ -939,6 +953,9 @@ export class VoiceEngine {
         break;
       case 'previous':
         await this.executePrevious(accountId, deviceId);
+        break;
+      case 'pause':
+        await this.executePause(accountId, deviceId);
         break;
       case 'stop':
         await this.executeStop(accountId, deviceId);
@@ -1773,6 +1790,20 @@ export class VoiceEngine {
   /**
    * 执行停止播放
    */
+  /**
+   * 暂停播放（规格第 62 行）：保留位置与播放上下文，用户可说「继续播放」原位恢复。
+   *
+   * 与 executeStop 的区别是语义级的：stop 清空播放上下文（stopped 态，需重新加载歌单），
+   * pause 只挂起（paused 态，位置保留）。因此「暂停」类口令必须走这里而不是 stop。
+   *
+   * 睡眠定时器不在此取消：定时器的作用是「稍后停」，暂停后恢复播放时它仍应生效。
+   */
+  private async executePause(accountId: string, deviceId: string): Promise<void> {
+    this.cancelPendingResume();
+    const pm = await this.playlistManagerMap.getOrCreate(accountId, deviceId);
+    await pm.pause();
+    songloft.log.info('[VoiceEngine] Playback paused');
+  }
   private async executeStop(accountId: string, deviceId: string): Promise<void> {
     this.cancelPendingResume();
     // 主动停止时清除 sleep timer

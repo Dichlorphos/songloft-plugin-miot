@@ -133,3 +133,22 @@
 - 复现记录：
   - 2026-09-19：为验证“手动别名豁免淘汰”新增自检断言后，本地直跑自检脚本时必现。
 
+
+### 2026-09-20 — npm run build — prebuild 脚本重写数据文件行尾，污染工作区
+
+- 状态：workaround
+- 工具及版本：Node.js v24.21.0；`scripts/fetch-holidays.mjs` + `scripts/build-pinyin-data.mjs`（`prebuild` 钩子）
+- 环境：Windows 11 + PowerShell；仓库检出为 CRLF
+- 现象：`npm run build`（以及 `npm run dev`）成功后，`git status` 凭空多出 4 个已修改文件，内容却没有任何语义变化。反复 checkout 后只要再 build 一次就会再次出现，容易被误提交进版本库。
+- 原始错误：无报错。`git diff` 为空、`git diff --stat` 也是空，只有 `git status` 报 ` M`：
+  - `src/data/holidays/2026.json`
+  - `src/data/holidays/2027.json`
+  - `src/data/holidays/index.ts`
+  - `src/data/pinyin-map.ts`
+  - 伴随警告：`warning: in the working copy of '…', LF will be replaced by CRLF the next time Git touches it`
+- 根因：两个 prebuild 脚本用 `writeFileSync` 写数据文件时使用 `\n`，绕过 Git 的 `core.autocrlf` 检出转换。仓库里这几个文件按 CRLF 存储/检出，脚本重写成 LF-only 后，索引里内容哈希未变（Git 归一化后一致）但工作区字节与索引不一致，于是 `git status` 显示为已修改，而 `git diff` 无输出。
+- 解决方案或规避方案：构建后、提交前执行 `git checkout -- src/data/holidays/2026.json src/data/holidays/2027.json src/data/holidays/index.ts src/data/pinyin-map.ts` 还原行尾。不要用 `git add -A` 一把梭，避免把行尾噪声带进提交。若要根治，可让 prebuild 脚本按 `.gitattributes`/`core.autocrlf` 写对应行尾，或给这几个文件加 `.gitattributes` 固定 `text eol=crlf`。
+- 验证：`npm run build` 后 `git status --short` 出现上述 4 个 ` M`；`git --no-pager diff --numstat` 输出为空；`git checkout --` 后恢复干净。
+- 相关链接：`scripts/fetch-holidays.mjs`、`scripts/build-pinyin-data.mjs`、`package.json` 的 `prebuild`
+- 复现记录：
+  - 2026-09-20：本次任务中 `npm run build` 两次，两次都在成功后出现同样 4 个假改动。

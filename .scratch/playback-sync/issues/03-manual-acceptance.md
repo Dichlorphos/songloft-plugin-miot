@@ -4,13 +4,13 @@ Type: task
 Status: ready-for-human
 Blocked by: 01, 02
 Release gate: 阻塞播放同步相关版本发布；不阻塞后续开发
-验收对象：截至 2026-09-19 的播放同步实现（`3bbc4e9`）与播放路径后续改动（Music API 开关 `bb589c5`、不可播放自动跳过 `be80630`）。播放同步相关代码此后如有改动，必须重新确认本票据；受影响项要重测，或显式记录豁免。
+验收对象：截至 2026-09-19 的播放同步实现（`3bbc4e9`）与播放路径后续改动（Music API 开关 `bb589c5`、不可播放自动跳过 `be80630`）。**2026-09-20 补充**：补齐自动化测试时改动了播放与语音代码（`#466` 起播失败判定抽成 `src/player/landing_failure.ts`、语音 pause/stop 分离、旧口令迁移），entryHash 刷新为 `bac7ce6c…`。受影响的 I1–I6、G4、以及「暂停」相关场景须重测；其余项沿用先前结论。
 
 ## 目的
 
 自动化验证已经覆盖纯逻辑、宿主集成、前端合同与构建，但无法代替真实 MIoT 设备、真实网络、真实存储和真实播放服务。本票据把 spec 的「真机验收」拆成可执行清单；`Status: done` 只表示实现与自动化验证完成，不代表本票据通过。
 
-自动化验证现状：`npm test` 92 项通过、`npm run typecheck`、`node frontend/tests/run.mjs`、`npm run build` 通过。真机结果必须以实际观察和证据为准，不得用自动化结果代替。
+自动化验证现状（2026-09-20）：`npm test` **154 项**通过、`npm run typecheck`、`node frontend/tests/run.mjs`、`npm run build` 通过。本次补齐了此前零覆盖的 I1–I6、D4（unknown 真实链路）、H1/H3（Music API 开关判定）、快照出口接线断言；G4 的 pause/stop 分离已按规格实现。真机结果必须以实际观察和证据为准，不得用自动化结果代替。
 
 ## 验收边界
 

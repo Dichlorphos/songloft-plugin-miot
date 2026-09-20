@@ -47,6 +47,7 @@ function makeCoordinator(options: {
   currentDevice?: string | null;
   isGroup?: boolean;
   sampled?: number | null;
+  playOutcome?: 'succeeded' | 'failed' | 'unknown';
 } = {}) {
   const snapshotStorage = memoryStorage();
   const pendingStorage = memoryStorage();
@@ -91,7 +92,7 @@ function makeCoordinator(options: {
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
     playPlaylist: async (_accountId, _targetDeviceId, playlistId, song, songIndex, positionSec, mode, _speed) => {
       calls.push(`play:${playlistId}:${song.id}:${songIndex}:${positionSec}:${mode}`);
-      return 'succeeded';
+      return options.playOutcome ?? 'succeeded';
     },
   });
 
@@ -209,6 +210,48 @@ test('取不到歌曲对象时保留 pending 并报告失败', async () => {
   assert.ok(await pendingStore.read('acc1', 'devB', 10_000));
 });
 
+test('下发结果 unknown 时对外报告 unknown 且保留 pending', async () => {
+  const { coordinator, pendingStore } = makeCoordinator({ playOutcome: 'unknown' });
+  await pendingStore.write({ account_id: 'acc1', target_device_id: 'devB', source_revision: 3, snapshot: snapshot(), now: 10_000 });
+
+  const result = await coordinator.tryResumePending('acc1', 'devB');
+
+  assert.equal(result.outcome, 'unknown', 'unknown 必须如实上报，不得降级成 failed');
+  assert.ok(await pendingStore.read('acc1', 'devB', 10_000), 'unknown 不得清除 pending');
+});
+
+test('下发结果 failed 时保留 pending', async () => {
+  const { coordinator, pendingStore } = makeCoordinator({ playOutcome: 'failed' });
+  await pendingStore.write({ account_id: 'acc1', target_device_id: 'devB', source_revision: 3, snapshot: snapshot(), now: 10_000 });
+
+  const result = await coordinator.tryResumePending('acc1', 'devB');
+
+  assert.equal(result.outcome, 'failed');
+  assert.ok(await pendingStore.read('acc1', 'devB', 10_000), '失败必须保留 pending');
+});
+
+test('下发抛错时有 pending 不得报告 none（否则调用方会回退目标原上下文）', async () => {
+  const snapshotStorage = memoryStorage();
+  const pendingStore = new PendingContextStore(memoryStorage());
+  await pendingStore.write({ account_id: 'acc1', target_device_id: 'devB', source_revision: 3, snapshot: snapshot(), now: 10_000 });
+
+  const coordinator = new SwitchCoordinator({
+    snapshotStore: new PlaybackSnapshotStore(snapshotStorage),
+    pendingStore,
+    now: () => 10_000,
+    getCurrentDevice: async () => 'devA',
+    setCurrentDevice: async () => {},
+    isGroupDevice: async () => false,
+    sampleOnSwitch: async () => ({ ok: false, reason: 'no_snapshot' as const }),
+    loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
+    playPlaylist: async () => { throw new Error('ubus timeout'); },
+  });
+
+  const result = await coordinator.tryResumePending('acc1', 'devB');
+
+  assert.notEqual(result.outcome, 'none', '有 pending 时绝不能报告 none');
+  assert.ok(await pendingStore.read('acc1', 'devB', 10_000), '非成功结果不得清除 pending');
+});
 test('下发成功后清除 pending；失败保留', async () => {
   const { coordinator, pendingStore } = makeCoordinator();
   await pendingStore.write({ account_id: 'acc1', target_device_id: 'devB', source_revision: 3, snapshot: snapshot(), now: 10_000 });

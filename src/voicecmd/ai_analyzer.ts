@@ -19,7 +19,8 @@ const AI_SYSTEM_PROMPT = `从指令中提取出操作和音乐信息，返回JSO
 - cancel_sleep_timer: 取消定时停止
 - query_sleep_timer: 查询定时剩余时间
 - resume: 继续/恢复播放
-- next/previous/stop/unknown
+- pause: 暂停播放（保留播放位置，用户之后可以继续播放；与 stop 不同，stop 是停止播放）
+- next/previous/pause/stop/unknown
 
 规则：
 1. "XX的YY"中XX是歌手名则artist=XX,name=YY，否则整句为歌名（如"你的答案"→name）
@@ -47,7 +48,9 @@ const AI_SYSTEM_PROMPT = `从指令中提取出操作和音乐信息，返回JSO
 取消定时→{"action":"cancel_sleep_timer","params":{},"confidence":"high","rawText":"取消定时"}
 还有多久停→{"action":"query_sleep_timer","params":{},"confidence":"high","rawText":"还有多久停"}
 继续播放→{"action":"resume","params":{},"confidence":"high","rawText":"继续播放"}
-恢复播放→{"action":"resume","params":{},"confidence":"high","rawText":"恢复播放"}`;
+恢复播放→{"action":"resume","params":{},"confidence":"high","rawText":"恢复播放"}
+暂停播放→{"action":"pause","params":{},"confidence":"high","rawText":"暂停播放"}
+停止播放→{"action":"stop","params":{},"confidence":"high","rawText":"停止播放"}`;
 
 /**
  * AI 口令分析器

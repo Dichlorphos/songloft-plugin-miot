@@ -11,6 +11,7 @@ import { getHostBaseUrl, callHostAPI } from '../utils/http';
 import type { PlayState, PlayMode, PlayerStatus, DeviceTargetRef, DeviceGroup } from '../types';
 import type { PlaybackRecorder } from '../playback_sync/recorder';
 import { buildObservation } from '../playback_sync/observation';
+import { decideLandingFailure, isEarlyLandingStop, LandingFailureCounter, LANDING_FAILURE_CIRCUIT_BREAK } from './landing_failure';
 
 /** 分配临时歌单唯一负数 ID（每个设备/歌手各一个，互不冲突） */
 let nextTempPlaylistId = -1;
@@ -127,19 +128,6 @@ const LANDING_VERIFY_FIRST_DELAY_MS = 10000;
 const LANDING_VERIFY_RETRY_DELAY_MS = 8000;
 const LANDING_VERIFY_ATTEMPTS = 2;
 
-/**
- * 连续起播失败的熔断阈值：达到即停播并 TTS 提示，避免整个音源都挂时把整个歌单跳完。
- * 计数在任何一次起播确认成功（status=1）后清零。
- */
-const LANDING_FAILURE_CIRCUIT_BREAK = 3;
-
-/**
- * 「外部停止 + 位置极早」→ 起播失败等价情形（#466）。
- * checkExternalStop 确认外部停止时若 position 落在起播早期窗口内，语义等同「刚下发的
- * 这首没真播上」，走 handleLandingFailure（跳下一首 + TTS）而不是 stop(false)。
- * 起播确认漏网（首查恰好 status=1、随后 502）由这条兜住。
- */
-const LANDING_EARLY_STOP_SEC = 15;
 
 /** 单首跳歌 TTS 文案 */
 const LANDING_FAILURE_TTS_TEXT = '这首歌暂时无法播放，为您切换下一首';
@@ -275,7 +263,8 @@ export class PlaylistManager {
   private durationProbeTimer: any = null; // 定时器ID（duration==0 时兜底切歌探测，见 DURATION_PROBE_* 常量）
   private maxProbePosition: number = 0;   // 循环回零探测：本轮见过的最大设备 position，用于判定是否回零
   private landingVerifyTimer: any = null; // 定时器ID（起播确认探测，见 LANDING_VERIFY_* 常量）
-  private landingFailureCount: number = 0; // 连续起播失败次数（#466 熔断），任何一次确认成功即清零
+  // 连续起播失败计数（#466 熔断）：任何一次起播确认成功即清零，契约见 landing_failure.ts。
+  private readonly landingFailure = new LandingFailureCounter();
   private unplayableSongIds: Set<number> = new Set(); // 预取失败的歌曲 id，advanceToNext 遇到直接再跳
   private totalSongs: number = 0;
   private playStartTimeMs: number = 0;  // 当前歌曲开始播放的时间戳(ms)
@@ -1546,7 +1535,7 @@ export class PlaylistManager {
 
     if (status === 1) {
       // 起播成功：清零连续失败计数（熔断阈值只累计连续失败）
-      this.landingFailureCount = 0;
+      this.landingFailure.recordLanded();
       return;
     }
 
@@ -1589,11 +1578,19 @@ export class PlaylistManager {
   private async handleLandingFailure(opts: { tts: boolean }): Promise<void> {
     if (this.state !== 'playing') return;
 
-    this.landingFailureCount++;
-    // 熔断：连续多首无法起播 → 停播 + 长文案 TTS，让用户明确知道是音源问题而不是设备问题
-    if (this.landingFailureCount >= LANDING_FAILURE_CIRCUIT_BREAK) {
-      songloft.log.error(`[PlaylistManager] Landing failure circuit breaker tripped (count=${this.landingFailureCount}), stopping playback`);
-      this.landingFailureCount = 0;
+    const count = this.landingFailure.recordFailure();
+    const song = this.getCurrentSong();
+    // 动作判定归 landing_failure.ts 的纯函数：I1 跳歌 / I2 电台单曲停播 / I3 熔断。
+    // 三条验收项在接缝处可直接观察，不必穿透本方法等待真实的 10+8 秒定时器。
+    const action = decideLandingFailure({
+      consecutiveFailures: count,
+      isRadio: song?.type === 'radio',
+      isSinglePlay: this.playMode === 'singlePlay',
+    });
+
+    if (action === 'circuit-break') {
+      songloft.log.error(`[PlaylistManager] Landing failure circuit breaker tripped (count=${count}), stopping playback`);
+      this.landingFailure.reset();
       if (opts.tts) {
         void this.minaService.textToSpeech(this.accountId, this.deviceId, LANDING_CIRCUIT_BREAK_TTS_TEXT).catch(() => {});
       }
@@ -1601,9 +1598,8 @@ export class PlaylistManager {
       return;
     }
 
-    // 电台/单曲播放无「下一首」语义：走终点式停播
-    const song = this.getCurrentSong();
-    if (song?.type === 'radio' || this.playMode === 'singlePlay') {
+    if (action === 'terminal-stop') {
+      // 电台/单曲播放无「下一首」语义：走终点式停播
       if (opts.tts) {
         void this.minaService.textToSpeech(this.accountId, this.deviceId, LANDING_TERMINAL_FAILURE_TTS_TEXT).catch(() => {});
       }
@@ -2016,7 +2012,7 @@ export class PlaylistManager {
             // 判失败同源，直接走 handleLandingFailure：可跳歌就跳、电台/单曲播放就 TTS 停播（#466）。
             // 起播确认漏网（首查恰好 status=1、随后 502）由这条兜住。
             const song = this.getCurrentSong();
-            if (song && position >= 0 && position < LANDING_EARLY_STOP_SEC) {
+            if (song && isEarlyLandingStop(position)) {
               songloft.log.warn(`[PlaylistManager] External stop early (status=${status}, position=${position}s), treating as landing failure`);
               if (song.id > 0) this.unplayableSongIds.add(song.id);
               await this.handleLandingFailure({ tts: true });
@@ -2274,9 +2270,9 @@ export class PlaylistManager {
 
     songloft.log.error('[PlaylistManager] Auto-next failed after retry, stopping');
     // 熔断计数：多首连续硬失败达阈值时给用户 TTS 提示（#466）
-    this.landingFailureCount++;
-    if (this.landingFailureCount >= LANDING_FAILURE_CIRCUIT_BREAK) {
-      this.landingFailureCount = 0;
+    const hardFailureCount = this.landingFailure.recordFailure();
+    if (hardFailureCount >= LANDING_FAILURE_CIRCUIT_BREAK) {
+      this.landingFailure.reset();
       void this.minaService.textToSpeech(this.accountId, this.deviceId, LANDING_CIRCUIT_BREAK_TTS_TEXT).catch(() => {});
     }
     this.state = 'stopped';

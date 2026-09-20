@@ -20,7 +20,7 @@ import type {
   PlaylistProgressStore,
 } from '../types';
 import { DEFAULT_MEMORY_MAX_RECORDS, normalizeMemoryMaxRecords } from '../memory/types';
-import { getDefaultVoiceCommands } from '../voicecmd/defaults';
+import { getDefaultVoiceCommands, migrateLegacyStopCommand } from '../voicecmd/defaults';
 
 // ===== 存储键常量 =====
 const STORAGE_KEY_CONFIG = 'config';
@@ -478,11 +478,24 @@ export class ConfigManager {
 
   // ===== 语音口令 =====
 
-  /** 获取语音口令配置，存储为空时回退到默认口令 */
+  /**
+   * 获取语音口令配置，存储为空时回退到默认口令。
+   *
+   * 迁移：早期默认口令把「暂停/pause」并入了 stop，用户一旦保存过口令就会固化这份
+   * 旧配置，永远拿不到后来拆出的 pause 动作（规格第 62 行要求两者区分）。这里做一次性
+   * 迁移——只把仍等于旧默认 stop 项的那份配置替换为含 pause 的新默认，用户自定义过的
+   * 口令一律不动。
+   */
   async getVoiceCommands(): Promise<VoiceCommand[]> {
     const commands = await this.load<VoiceCommand[]>(STORAGE_KEY_VOICE_COMMANDS, []);
     if (commands.length === 0) {
       return getDefaultVoiceCommands();
+    }
+
+    const migrated = migrateLegacyStopCommand(commands);
+    if (migrated) {
+      await this.save(STORAGE_KEY_VOICE_COMMANDS, migrated);
+      return migrated;
     }
     return commands;
   }
