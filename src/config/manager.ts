@@ -32,6 +32,14 @@ const STORAGE_KEY_SCHEDULE_LOGS = 'schedule_logs';
 const STORAGE_KEY_AI_CONFIG = 'ai_config';
 const STORAGE_KEY_SEARCH_PROVIDERS = 'search_provider_registry';
 const STORAGE_KEY_DEVICE_GROUPS = 'device_groups';
+/**
+ * 「上次是否正常关机」标记（songloft-org/songloft-plugin-miot#96）。
+ *
+ * onDeinit 写、onInit 读后立即清除，因此正常情况下这个键**总是空的**；它还在，
+ * 就说明上一次进程是被强杀 / 断电 / 崩溃带走的，onDeinit 没走完。异常终止后一律
+ * 不自动续播——重启本来就不是正常路径，音箱该不该出声应当由用户重新明确决定。
+ */
+const STORAGE_KEY_CLEAN_SHUTDOWN = 'clean_shutdown';
 const STORAGE_KEY_PLAYLIST_PROGRESS = 'playlist_progress';
 
 /** 搜索源候选注册默认搜索子路径 */
@@ -229,6 +237,39 @@ export class ConfigManager {
       }];
     }
     return [];
+  }
+
+  // ===== 停机标记（供重启恢复做硬条件否决） =====
+
+  /**
+   * 读取并清除清洁停机标记。
+   *
+   * 返回 true 仅当上一次 onDeinit 完整跑完（写了标记、且这次是紧接着的那次启动）。
+   * 无论读到什么都要清掉：标记是**一次性**的，本次启动自己也要靠 onDeinit 重新写。
+   * 读取失败按「异常终止」处理（保守方向：不自动续播）。
+   */
+  async consumeCleanShutdownFlag(): Promise<boolean> {
+    let raw: unknown = null;
+    try {
+      raw = await songloft.storage.get(STORAGE_KEY_CLEAN_SHUTDOWN);
+    } catch (e) {
+      return false;
+    }
+    try {
+      await songloft.storage.delete(STORAGE_KEY_CLEAN_SHUTDOWN);
+    } catch (e) {
+      // 清不掉也只能继续：标记留着会让下次启动误判为异常终止，代价是多一次不自动续播
+    }
+    return raw === true || raw === 'true';
+  }
+
+  /** 写下清洁停机标记；onDeinit 调用，代表这次卸载是宿主主动的、可预期的。 */
+  async markCleanShutdown(): Promise<void> {
+    try {
+      await songloft.storage.set(STORAGE_KEY_CLEAN_SHUTDOWN, 'true');
+    } catch (e) {
+      // 写不进去就退化为「下次按异常终止处理」，不影响卸载本身
+    }
   }
 
   /** 保存插件全局配置 */

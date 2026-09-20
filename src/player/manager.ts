@@ -25,12 +25,18 @@ function allocTempPlaylistId(): number {
  * ConversationMonitor 捕获、且网页/App 已关闭没有轮询校准）完全不知情，到期会无条件
  * 给设备推下一首，表现为"关机后隔一段时间又自动播放"。
  */
-/**
- * 重载续播锚点的最长有效期（songloft-org/songloft-plugin-miot#96）。
- * 热重载只花一两秒，正常场景远小于这个值。超过就认为「不是同一次会话」——
- * 例如服务停了一夜、第二天有人打开网页才建 manager，此时绝不该把音箱叫起来放歌。
+/*
+ * 重启恢复为什么要用「硬条件」而不是「锚点过期时间」（songloft-org/songloft-plugin-miot#96）。
+ *
+ * 症状：服务停了一夜，第二天有人打开网页才惰性建出 manager，音箱被重新推流叫醒放歌。
+ * 早期实现拿「锚点不超过 5 分钟」当判据，方向错了——重启本来就不是正常路径，
+ * 该不该出声应当看设备此刻的真实状态，而不是看这份锚点有多新：
+ *   判据 1（兜底，不依赖宿主改动）：`playing` 锚点只有设备**确实还在放我们这条流**时才接管；
+ *     其余一切情况（没在放、在放别的媒体、流长对不上、查不到状态）都钉死 `stopped`。
+ *   判据 3：上次不是正常卸载（onDeinit 没走完，清洁停机标记缺失）时，无论设备状态如何都不接管。
+ * 判据 1 只对 `playing` 有意义：`paused` / `stopped` 恢复本地状态时根本不碰设备，
+ * 不构成「跨会话把音箱叫起来」的通道。
  */
-const RESUME_ANCHOR_MAX_AGE_MS = 5 * 60 * 1000;
 
 /** 探测间隔：歌曲播放期间每隔这么久查一次设备真实播放状态 */
 const EXTERNAL_STOP_POLL_INTERVAL_MS = 20000;
@@ -2326,14 +2332,18 @@ export class PlaylistManager {
   }
 
   /**
-   * 生成「插件重载后续播」所需的锚点字段。
+   * 生成「插件重启后恢复」所需的锚点字段。
    *
    * 只存一个「某时刻播到某位置」的锚点，不做周期性写盘：连续播放时位置可以由
    * `锚点位置 + 经过墙钟时间 × 倍速` 精确外推，而每一次暂停 / 续播 / 切歌 / 改倍速
    * 都会重新调用 persistState 把锚点打新，所以锚点不会长期失真。
    *
-   * 非播放态（stopped/idle）显式写空值而不是留着旧锚点：留旧值会让下一次重载
-   * 误以为「刚才还在放」，凭空把音箱叫起来。
+   * `playing` / `paused` / `stopped` 都写：三者都是「用户可理解的可恢复状态」，
+   * 区别只在恢复时怎么处理设备（见 resumeAfterReload）。`stopped` 也必须写，
+   * 否则停止位置活不过重启——用户明确继续时会退化从头播，等同于丢掉断点。
+   *
+   * 只有 idle（没有明确播放意图，例如加载新歌单途中）写空值：那种状态没有可恢复语义，
+   * 留着旧锚点会让下一次重启误以为「刚才还在放」。
    */
   private buildResumeAnchor(): {
     resume_state: string;
@@ -2342,12 +2352,20 @@ export class PlaylistManager {
     resume_song_id: number;
     resume_seek_offset_sec: number;
   } {
+    const empty = { resume_state: '', resume_position_sec: 0, resume_at_ms: 0, resume_song_id: 0, resume_seek_offset_sec: 0 };
     const song = this.getCurrentSong();
-    if (!song || (this.state !== 'playing' && this.state !== 'paused')) {
-      return { resume_state: '', resume_position_sec: 0, resume_at_ms: 0, resume_song_id: 0, resume_seek_offset_sec: 0 };
+    if (!song || (this.state !== 'playing' && this.state !== 'paused' && this.state !== 'stopped')) {
+      return empty;
     }
-    // getPosition() 在非 playing 态恒返回 0，暂停位置只能从 pausedPositionSec 取
-    const position = this.state === 'paused' ? this.pausedPositionSec : this.getPosition();
+    // getPosition() 只在 playing 态可用：暂停取暂停位置，停止取停止位置。
+    let position: number;
+    if (this.state === 'paused') {
+      position = this.pausedPositionSec;
+    } else if (this.state === 'stopped') {
+      position = this.lastStopPositionSec;
+    } else {
+      position = this.getPosition();
+    }
     return {
       resume_state: this.state,
       resume_position_sec: Math.max(0, position),
@@ -2485,21 +2503,22 @@ export class PlaylistManager {
   }
 
   /**
-   * 插件重载后按持久化锚点把播放接回来。
+   * 插件重启后按持久化锚点恢复播放状态。
    *
-   * 背景：热重载销毁 JS 环境时，自动切歌定时器一起消失，而音箱那条流还在放。
-   * 旧实现只恢复歌单和索引（注释里写着"不自动播放"），于是当前这首放完后没有任何人
-   * 推进队列，用户听到的就是"播着播着突然停了"（songloft-org/songloft-plugin-miot#96）。
+   * 背景：热重载销毁 JS 环境时自动切歌定时器一起消失，而音箱那条流可能还在放。旧实现
+   * 只恢复歌单和索引，于是当前这首放完后没人推进队列，用户听到「播着播着突然停了」
+   * （songloft-org/songloft-plugin-miot#96）。但反过来，「重启后无条件把音箱叫起来」
+   * 同样有害：服务停了一夜、第二天有人打开网页才惰性建 manager 时，会把熟睡的音箱叫醒。
    *
-   * 三种情况分开处理：
-   *   1. 音箱还在放我们那条流 → **只把定时器接回来**，一个设备指令都不发，听感完全无缝。
-   *      这是自动更新场景下的绝大多数情况（重载只花一秒左右）。
-   *   2. 设备状态查不到（网络抖动）→ 按外推位置重建定时器。宁可少一次干预，
-   *      也不要把好端端在放的歌打断重推。
-   *   3. 音箱确实停了 / 在放别的媒体 → 带外推位置重推我们的 URL。
+   * 所以恢复规则按「有没有副作用」分类，而不是按锚点新旧：
+   *   - `paused` / `stopped`：只把本地状态与位置摆回去，**一个设备指令都不发**。
+   *     用户之后明确继续时，暂停态复用设备媒体上下文、停止态带 seek 重推。
+   *   - `playing`：只有设备**确实还在放我们这条流**才接管定时器（不需要任何指令）。
+   *     其余一切情况都钉死 `stopped` 并记下位置，绝不重推 URL。
    *
-   * 外推位置已超过曲末时不特殊处理：交给 resetAutoNextTimer，它对 remaining<=0 会
-   * 立即触发一次正常的自动切歌，播放模式语义（顺序/随机/单曲）由既有逻辑负责。
+   * @param anchor 持久化的恢复锚点
+   * @param opts.allowTakeover 判据 3：上次是否正常卸载。false 表示 onDeinit 没走完
+   *   （崩溃 / 强杀 / 断电），此时连设备状态都不必查，直接按停止处理。
    */
   async resumeAfterReload(anchor: {
     state: string;
@@ -2507,80 +2526,130 @@ export class PlaylistManager {
     atMs: number;
     songId: number;
     seekOffsetSec: number;
-  }): Promise<void> {
+  }, opts?: { allowTakeover?: boolean }): Promise<void> {
     const song = this.getCurrentSong();
     if (!song || song.id !== anchor.songId) {
       return;
     }
-
-    // 锚点太旧说明中间隔了很久（例如服务重启后过了几小时才有人访问），不该再把音箱叫起来
-    const ageMs = Date.now() - anchor.atMs;
-    if (anchor.atMs <= 0 || ageMs < 0 || ageMs > RESUME_ANCHOR_MAX_AGE_MS) {
+    if (!Number.isFinite(anchor.positionSec) || anchor.positionSec < 0) {
       return;
     }
 
-    this.streamSeekOffsetSec = anchor.seekOffsetSec;
+    // 旧数据可能缺 atMs / seekOffsetSec（restoreFromConfig 会补 0）：
+    // - atMs<=0 不能拿去外推，否则会算出从 Unix 纪元到现在的天文数字位置；
+    //   这种锚点按「刚写下」处理，最终仍由判据 1 决定是否接管。
+    // - seekOffsetSec 缺失时退化为 0，流长判据会因此更保守。
+    const anchorAtMs = Number.isFinite(anchor.atMs) && anchor.atMs > 0 ? anchor.atMs : Date.now();
+    const anchorSeekOffset = Number.isFinite(anchor.seekOffsetSec) && anchor.seekOffsetSec > 0 ? anchor.seekOffsetSec : 0;
 
+    this.streamSeekOffsetSec = anchorSeekOffset;
+
+    // ===== 无副作用分支：只还原本地状态，不碰设备 =====
     if (anchor.state === 'paused') {
       // 暂停态不碰设备，只把状态摆回去，让网页进度条和「继续播放」按钮行为正确。
-      // 刻意不持久化 hardStopped：重载后它归零，若当时其实是「暂停被设备升级成 stop」，
+      // 刻意不持久化 hardStopped：重启后它归零，若当时其实是「暂停被设备升级成 stop」，
       // 续播会先走裸 play 这条路。那条路有 verifyResumeOrRepush 兜底（约 2.4 秒后带 seek
       // 重推 URL），代价是慢一点而不是续不上，不值得为它多加一个持久化字段。
       this.state = 'paused';
       this.pausedPositionSec = anchor.positionSec;
+      this.playStartTimeMs = 0;
       songloft.log.info(`[PlaylistManager] Restored paused state after reload position=${anchor.positionSec.toFixed(1)}s song=${song.title}`);
+      return;
+    }
+    if (anchor.state === 'stopped') {
+      // 停止位置要活过重启：只摆状态，用户明确继续时由 replayCurrentFromStop 消费
+      // lastStopPositionSec（它会带 seek 重推，不是从头播）。
+      //
+      // 刻意不调 startResumePoll()：那套轮询是给「应用运行中用户按音箱物理键恢复」用的，
+      // 而这里刚重启、还什么都没发生。武装它等于每次启动都白白查设备最多 10 分钟，
+      // 且与改动前的行为一致（此前 stopped 压根不落盘，重启后停在 idle、同样没有轮询）。
+      this.state = 'stopped';
+      this.lastStopPositionSec = anchor.positionSec;
+      this.playStartTimeMs = 0;
+      this.pausedPositionSec = 0;
+      songloft.log.info(`[PlaylistManager] Restored stopped state after reload position=${anchor.positionSec.toFixed(1)}s song=${song.title}`);
       return;
     }
     if (anchor.state !== 'playing') {
       return;
     }
 
-    // 重载耗掉的墙钟时间要按倍速换算成曲内秒
+    // ===== playing 分支：必须拿到「设备真的在放我们这条流」的硬证据才接管 =====
+    // 锚点时刻到现在的墙钟时间按倍速换算成曲内秒，用于没接管时的停止位置。
+    const ageMs = Math.max(0, Date.now() - anchorAtMs);
     const estimated = anchor.positionSec + (ageMs / 1000) * this.playbackSpeed;
-    this.state = 'playing';
-    this.playStartTimeMs = Date.now() - (estimated / this.playbackSpeed) * 1000;
 
-    if (song.duration <= 0) {
-      // duration==0：重载后无法按曲长注册定时器，改启动设备流长探测兜底（#437）。
-      // 探测首轮读到设备流长后由 resetAutoNextTimer 按 device position 重锚并注册定时器。
-      songloft.log.info(`[PlaylistManager] Resume after reload: duration unknown, starting device duration probe at ${estimated.toFixed(1)}s song=${song.title}`);
-      this.scheduleDurationProbe();
+    // 判据 3：上次不是正常卸载 → 一律不接管，也不去打扰设备。
+    if (opts?.allowTakeover === false) {
+      await this.pinStoppedAfterReload(song.title, estimated, 'last shutdown was not clean');
       return;
     }
 
-    const deviceState = await this.minaService.getPlayState(this.accountId, this.deviceId);
-    if (deviceState.status < 0) {
-      songloft.log.warn(`[PlaylistManager] Resume after reload: device status unavailable, rebuilding timer at ${estimated.toFixed(1)}s`);
-      this.resetAutoNextTimer(estimated);
+    // 判据 1：只有确证设备在放我们的流才接管。先按「不外推」的锚点位置摆好本地基准，
+    // 但此刻还不置 playing —— 查设备期间其它入口可能介入，钉死前要再复核一次。
+    let deviceState: { status: number; position: number; duration: number } | null = null;
+    try {
+      deviceState = await this.minaService.getPlayState(this.accountId, this.deviceId);
+    } catch (e) {
+      songloft.log.warn('[PlaylistManager] Resume after reload: device state query failed: ' + String(e));
+    }
+
+    // 查询期间用户可能已经做了别的操作（手动播放/停止/切歌），不能覆盖新状态。
+    if (this.state !== 'idle' || (this.getCurrentSong()?.id ?? 0) !== anchor.songId) {
+      songloft.log.info('[PlaylistManager] Resume after reload: state changed during device query, skip');
       return;
     }
 
-    if (deviceState.status === 1 && this.matchDeviceStream(deviceState) !== 'foreign') {
+    if (!deviceState || deviceState.status < 0) {
+      await this.pinStoppedAfterReload(song.title, estimated, 'device state unavailable');
+      return;
+    }
+
+    // 设备在放、且流长与「我们推的那条流」对得上（'unknown' 不算，信息不足时保守钉死）。
+    if (deviceState.status === 1 && this.matchDeviceStream(deviceState, { seekSeconds: anchorSeekOffset, speed: this.playbackSpeed }) === 'ours') {
       // 设备实测位置优先（它才知道缓冲耗了多久）；没上报就用外推值
       const devicePosition = deviceState.position > 0
-        ? deviceState.position * this.playbackSpeed + this.streamSeekOffsetSec
+        ? deviceState.position * this.playbackSpeed + anchorSeekOffset
         : estimated;
-      songloft.log.info(`[PlaylistManager] Resume after reload: our stream still playing, timer taken over at ${devicePosition.toFixed(1)}s song=${song.title}`);
-      this.resetAutoNextTimer(devicePosition);
+      this.state = 'playing';
+      this.hardStopped = false;
+      this.pausedPositionSec = 0;
+      this.playStartTimeMs = Date.now() - (devicePosition / this.playbackSpeed) * 1000;
+      if (song.duration > 0) {
+        songloft.log.info(`[PlaylistManager] Resume after reload: our stream still playing, timer taken over at ${devicePosition.toFixed(1)}s song=${song.title}`);
+        this.resetAutoNextTimer(devicePosition);
+      } else {
+        // duration==0：重载后无法按曲长注册定时器，改启动设备流长探测兜底（#437）。
+        songloft.log.info(`[PlaylistManager] Resume after reload: duration unknown, starting device duration probe at ${devicePosition.toFixed(1)}s song=${song.title}`);
+        this.scheduleDurationProbe();
+      }
       return;
     }
 
-    if (estimated >= song.duration) {
-      songloft.log.info(`[PlaylistManager] Resume after reload: song already finished during reload (estimated=${estimated.toFixed(1)}s/${song.duration}s), advancing`);
-      this.resetAutoNextTimer(estimated);
-      return;
-    }
+    await this.pinStoppedAfterReload(
+      song.title,
+      estimated,
+      `device not verifiably playing our stream (status=${deviceState.status} deviceDuration=${deviceState.duration}s)`,
+    );
+  }
 
-    songloft.log.info(`[PlaylistManager] Resume after reload: device not playing our stream (status=${deviceState.status} deviceDuration=${deviceState.duration}s), re-pushing seek=${estimated.toFixed(1)}s song=${song.title}`);
-    const ok = await this.playCurrent({ seekSeconds: estimated, skipAnnouncement: true });
-    if (!ok) {
-      songloft.log.warn('[PlaylistManager] Resume after reload failed, staying stopped');
-      this.state = 'stopped';
-      this.playStartTimeMs = 0;
-      // 与 advanceToNext 的失败收尾同源：重推失败可能是 3012 假失败且核实漏判（#98），
-      // 留一张外部恢复兜底网，别让重载后的一次下发失败变成永久停摆。
-      this.startResumePoll();
-    }
+  /**
+   * 重启恢复的「钉死为停止」收尾：记下位置、绝不重推 URL。
+   *
+   * 这是防「隔夜叫醒音箱」的兜底出口——所有拿不到「设备确实在放我们的流」硬证据的
+   * playing 锚点都收敛到这里，不可能再有别的分支去 playCurrent。
+   *
+   * 落盘后下次重启读到的是 stopped 锚点，直接走无副作用的还原分支：既不会重新查设备，
+   * 也不会因为旧锚点还写着 playing 而反复进入本函数。
+   */
+  private async pinStoppedAfterReload(songTitle: string, positionSec: number, reason: string): Promise<void> {
+    this.state = 'stopped';
+    this.playStartTimeMs = 0;
+    this.pausedPositionSec = 0;
+    const duration = this.getCurrentSong()?.duration ?? 0;
+    this.lastStopPositionSec = Math.max(0, duration > 0 ? Math.min(positionSec, duration) : positionSec);
+    songloft.log.info(`[PlaylistManager] Resume after reload: pinned stopped at ${this.lastStopPositionSec.toFixed(1)}s (${reason}) song=${songTitle}`);
+    await this.persistState();
   }
 }
 
@@ -2602,10 +2671,21 @@ export class PlaylistManagerMap {
   private snapshotRecorder?: PlaybackRecorder;
   // 新内容请求回调：由 main 注入，播放新歌单/新歌曲前清除 pending。
   private newContentHook?: (accountId: string, deviceId: string) => Promise<void>;
+  // 判据 3：上次插件卸载是否正常（onDeinit 完整跑完）。缺省 false = 按异常终止处理，
+  // 宁可少一次自动接管，也不在崩溃/断电后擅自把音箱叫起来（见 resumeAfterReload）。
+  private lastShutdownClean: boolean = false;
 
   constructor(minaService: MinaService, configManager: ConfigManager) {
     this.minaService = minaService;
     this.configManager = configManager;
+  }
+
+  /**
+   * 注入「上次是否正常卸载」。由 main 在 onInit 读取清洁停机标记后立刻调用，
+   * 必须早于任何 getOrCreate（否则惰性恢复会按默认的「异常终止」处理）。
+   */
+  setLastShutdownClean(clean: boolean): void {
+    this.lastShutdownClean = clean;
   }
 
   /** 注入快照采集器；对已存在的 manager 一并生效。 */
@@ -2746,7 +2826,7 @@ export class PlaylistManagerMap {
     // 且续播失败也不该让 getOrCreate 失败。必须自带 catch，否则游离 promise 抛出
     // 会变成 QuickJS 里的 unhandled rejection。
     if (resumeAnchor) {
-      void manager.resumeAfterReload(resumeAnchor).catch(e => {
+      void manager.resumeAfterReload(resumeAnchor, { allowTakeover: this.lastShutdownClean }).catch(e => {
         songloft.log.warn('[PlaylistManagerMap] resumeAfterReload failed: ' + String(e));
       });
     }
@@ -2914,7 +2994,7 @@ export class PlaylistManagerMap {
         songloft.log.info(`[PlaylistManagerMap] Restored playlist from config playlistId=${devCfg.playlist_id} index=${startIndex} mode=${playMode} speed=${speed}`);
 
         const resumeState = devCfg.resume_state || '';
-        if (resumeState === 'playing' || resumeState === 'paused') {
+        if (resumeState === 'playing' || resumeState === 'paused' || resumeState === 'stopped') {
           return {
             state: resumeState,
             positionSec: devCfg.resume_position_sec || 0,

@@ -41,11 +41,15 @@ export interface DeviceConfig {
   last_selected_at: string;
   temp_artist?: string;      // 临时歌手歌单的搜索词，重启后用于恢复
 
-  // ===== 重载续播锚点（songloft-org/songloft-plugin-miot#96）=====
+  // ===== 重载/重启恢复锚点（songloft-org/songloft-plugin-miot#96）=====
   // 插件热重载（自动更新、手动更新、zip 变更热重载）会销毁整个 JS 环境，
   // PlaylistManager 的内存自动切歌定时器随之消失。只恢复歌单/索引不够——没人推进队列，
   // 音箱把当前那条流放完就彻底静默。下面五个字段让重载后能算出"当时播到哪、该怎么接上"。
-  resume_state?: string;         // 'playing' | 'paused'；其余值/缺省视为不需要恢复
+  //
+  // 恢复规则用「硬条件」而不是锚点年龄：playing 只有设备确实还在放我们这条流才接管
+  // （拿不到硬证据一律钉死 stopped，绝不重推 URL）；paused / stopped 只还原本地状态、
+  // 不碰设备。此外上次若不是正常卸载（见 ConfigManager 的清洁停机标记），一律不自动续播。
+  resume_state?: string;         // 'playing' | 'paused' | 'stopped'；其余值/缺省视为不需要恢复
   resume_position_sec?: number;  // 锚点时刻的曲内绝对位置（秒）
   resume_at_ms?: number;         // 锚点对应的墙钟时刻（Date.now()），用于按经过时间外推位置
   resume_song_id?: number;       // 锚点属于哪一首；恢复时对不上就不续播，避免歌单变动后错位

@@ -152,3 +152,24 @@
 - 相关链接：`scripts/fetch-holidays.mjs`、`scripts/build-pinyin-data.mjs`、`package.json` 的 `prebuild`
 - 复现记录：
   - 2026-09-20：本次任务中 `npm run build` 两次，两次都在成功后出现同样 4 个假改动。
+
+### 2026-09-21 — PowerShell here-string — 用 here-string 改 TS 源码会静默失效或误转义
+
+- 状态：workaround
+- 工具及版本：PowerShell 7 (pwsh) + `Set-Content`/`-Raw`；Node.js v24.21.0；仓库文件为 CRLF 检出
+- 环境：Windows 11 + 本项目仓库；`exec_command` 的 `shell` 未显式指定时可能落到 bash
+- 现象：用 `$raw.Replace(...)` 批量改 `src/**/*.ts` 时，脚本报“成功”但文件没变；换一种写法又报 `SyntaxError: Unexpected identifier`。
+- 原始错误：
+  - 静默：`Write-Output 'ok'` 打印了，但 `rg` 搜不到新代码，diff 里也没有对应 hunk。
+  - 报错：`SyntaxError: Unexpected identifier 'playing'`，指向内容里的中文行。
+- 根因（两个独立坑）：
+  1. **CRLF/LF 不匹配**：仓库里 `src/main.ts`、`src/config/manager.ts` 等是 CRLF 检出，而 `Get-Content`/`Set-Content` 往返可能只保留一部分行尾；here-string 字面量里写的是 `\n`，`String.Replace` 找不到就**静默不替换**（`Replace` 不匹配不报错）。
+  2. **here-string 的转义规则**：`@"..."@`（双引号 here-string）会展开 `$` 与反引号；把含 `${...}`、反引号的 TS 模板字面量塞进去，会被 PowerShell 先解释掉或外泄成语法错误。`@'...'@` 虽不展开，但里面的**单引号**又需配对，中文文案里用反引号包代码片段时极易踩。
+- 解决方案或规避方案：
+  1. 改文件统一**显式指定 `shell: 'powershell'`**，不要依赖默认 shell；混用 bash 时 `2>$null` 会被 bash 当成重定向，生成名为 `$null` 的垃圾文件。
+  2. 替换前先归一化行尾：`s.replace(/\r\n/g, '\n')`，写完再统一按 LF 落盘（或保持仓库既有风格）。
+  3. **改源码优先用 Node 脚本**（`node patch.cjs`）而不是 PowerShell here-string：模板字面量可原样书写，且开头必须做 `if (!s.includes(old)) throw` 断言，避免静默不替换。含反引号的文案改用字符串数组 `.join('\n')` 拼接，绕开模板字面量嵌套。
+- 验证：本任务里同一处 `resumeAfterReload` 改动，用 PowerShell `.Replace` 静默失败一次；改成带断言的 Node 脚本后稳定生效，`npm test` 181 项、`npm run typecheck`、`npm run build` 全绿。
+- 相关链接：`docs/agents/tool-issues.md` 的构建污染条目（同源 CRLF 问题）、`.scratch/playback-sync/` 下本次改动
+- 复现记录：
+  - 2026-09-21：本任务中 `.Replace` 静默 no-op 1 次，here-string 反引号误转义 3 次。

@@ -89,7 +89,12 @@ async function onInit(): Promise<void> {
   indexingManager = new IndexingManager(configManager);
   authService = new AuthService(configManager, accountManager);
   minaService = new MinaService(accountManager, configManager);
+  // 判据 3：读取并**清除**清洁停机标记。读到 true 说明上次 onDeinit 完整跑完，
+  // 本次允许在设备确实还在放我们的流时接管；否则（崩溃/强杀/断电）一律不自动续播。
+  // 必须在建 manager 之前读——惰性恢复由 getOrCreate 触发，晚了就来不及拦截。
+  const lastShutdownClean = await configManager.consumeCleanShutdownFlag();
   playlistManagerMap = new PlaylistManagerMap(minaService, configManager);
+  playlistManagerMap.setLastShutdownClean(lastShutdownClean);
   // 播放快照采集器：注入到播放管理器，由其状态机出口上报观测。
   playlistManagerMap.setSnapshotRecorder(getPlaybackRecorder());
   // 新内容请求（网页/语音/定时任务）在加载与起播前清除 pending；于 PlaylistManager 内统一收口。
@@ -228,6 +233,9 @@ async function onDeinit(): Promise<void> {
   conversationMonitor?.stop();
   playlistManagerMap?.cleanup();
   authService?.cleanup();
+  // 判据 3：写下清洁停机标记，供下次 onInit 判断本次卸载是否正常。
+  // 放在清理之后、最后一步：标记写了就代表前面几步都跑完了。
+  await configManager?.markCleanShutdown();
   songloft.log.info('MIoT 智能音箱插件已停止');
 }
 
