@@ -1,6 +1,6 @@
 // /player/toggle 与 /player/play 的响应契约测试（真实 Router，不 mock SDK）。
 //
-// 规格第 70 行：`toggle`、明确 resume 和实际播放接口返回 `outcome`；
+// 规格「数据契约」：`toggle`、明确 resume 和实际播放接口返回 `outcome`；
 // 第 68 行：unknown 对外报告 success:false + outcome:'unknown'。
 //
 // 这里用 SDK 的真实 createRouter 注册 handler，再用真实 HTTPRequest 驱动，
@@ -31,6 +31,8 @@ function fakeManager(overrides: Record<string, unknown> = {}) {
     getStatus: () => ({ state: 'stopped', playlist_id: 7, current_index: 0, play_mode: 'order', position: 0 }),
     getCurrentSong: () => ({ id: 11, title: 'T', artist: 'A' }),
     resumePlayback: async () => true,
+    replayCurrent: async () => true,
+    replayCurrentFromStop: async () => true,
     pause: async () => {},
     play: async () => true,
     playWithSongs: async () => true,

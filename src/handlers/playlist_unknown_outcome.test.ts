@@ -1,7 +1,7 @@
 // D4 契约：下发结果 unknown 时对外报告 success:false + outcome:'unknown'，
 // 不回滚设备、不清除待播放上下文。
 //
-// 规格第 68 行是这条验收项的判据。此处把真实的 SwitchCoordinator 注入 handler 的
+// 规格「数据契约」中 unknown 的对外报告要求是这条验收项的判据。此处把真实的 SwitchCoordinator 注入 handler 的
 // 模块单例，再驱动真实 createRouter，因此覆盖的是「unknown 从协调器一路传到 HTTP 响应」
 // 的完整契约，而不是任一层单独的形状。
 //

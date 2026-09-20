@@ -1,4 +1,4 @@
-// 语音口令的 pause / stop 分离（规格第 62 行、验收 G4）。
+// 语音口令的 pause / stop 分离（规格「语音行为」、验收 G4）。
 //
 // 规格：普通语音和 AI 区分 pause、stop、resume；旧 AI 返回 `stop` 始终按停止处理，
 // 只有明确解析为 `pause` 才暂停。

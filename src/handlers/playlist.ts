@@ -606,9 +606,15 @@ export function registerPlaylistHandlers(
         return jsonResponse({ success: false, error: '服务器地址为本地回环地址，MIoT 智能音箱无法访问。请在「设置」中修改为局域网 IP 地址。' });
       }
 
-      // 处于 stopped 状态或 resumePlayback 失败，重新播放
+      // 处于 stopped 状态或 resumePlayback 失败：重新下发。
+      // stopped 走 replayCurrentFromStop，从停止位置继续，而不是整首从头重播（规格「快照范围与生命周期」）。
       manager.setAnnounceOnSongChange(false);
-      if (isTempPlaylistId(status.playlist_id)) {
+      if (status.state === 'stopped') {
+        const ok = await manager.replayCurrentFromStop();
+        if (!ok) {
+          return jsonResponse({ success: false, error: 'failed to resume playback' });
+        }
+      } else if (isTempPlaylistId(status.playlist_id)) {
         // 临时歌单：内存中歌曲列表仍在，直接重放
         const songs = manager.getSongs();
         if (!songs || songs.length === 0) {

@@ -37,7 +37,7 @@ export const LEGACY_STOP_KEYWORDS = [
 ];
 
 /**
- * 把旧默认 stop 项一次性拆成 pause + stop（规格第 62 行：两者必须区分）。
+ * 把旧默认 stop 项一次性拆成 pause + stop（规格「语音行为」：两者必须区分）。
  *
  * 返回迁移后的完整口令数组；无需迁移时返回 null，调用方据此避免无谓落盘。
  * 只在「存在一条 keywords 与旧默认完全一致的 stop」且「还没有 pause 项」时迁移。

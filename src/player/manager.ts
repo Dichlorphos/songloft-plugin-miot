@@ -618,6 +618,13 @@ export class PlaylistManager {
     }));
     this.hardStopped = results.includes('stopped');
 
+    // 设备忽略了 pause、实际升级为 stop 时，本次暂停位置就是这首歌的停止位置。
+    // 不更新的话，之后写的 stopped 快照会带上次停止的残留值（position_available 却仍为
+    // true），用户按「继续」也会跳到错误位置。
+    if (this.hardStopped) {
+      this.lastStopPositionSec = this.pausedPositionSec;
+    }
+
     songloft.log.info(`[PlaylistManager] Playback paused results=${results.join(',')} hardStopped=${this.hardStopped} position=${this.pausedPositionSec.toFixed(1)}s`);
 
     // 落盘暂停位置：不写的话重载续播会拿着「暂停前那个 playing 锚点」外推，
@@ -638,7 +645,12 @@ export class PlaylistManager {
    */
   async stop(pushToDevice = true): Promise<void> {
     // 停止前的位置要在状态与 pausedPositionSec 被清掉之前抓取，否则快照只剩 0。
-    this.lastStopPositionSec = this.state === 'paused' ? this.pausedPositionSec : this.getPosition();
+    // 已经是 stopped 时保留原值：getPosition() 在非 playing 态恒返回 0，无条件覆写会把
+    // 上次记录的位置擦掉，用户连点停止后就再也恢复不回去（停止位置只对同一首歌有效，
+    // 换歌由 playCurrent/init* 负责清空，不靠这里的覆写）。
+    if (this.state !== 'stopped') {
+      this.lastStopPositionSec = this.state === 'paused' ? this.pausedPositionSec : this.getPosition();
+    }
 
     this.stopCheckTimer();
     this.clearVoiceSuspend();
@@ -1166,6 +1178,24 @@ export class PlaylistManager {
     return this.playCurrent({ seekSeconds, skipAnnouncement: true });
   }
 
+  /**
+   * 停止后的恢复：从停止位置继续，而不是从头重播。
+   *
+   * 规格「快照范围与生命周期」要求 stop 保存停止前位置、用户明确继续后仍可恢复。stop() 确实把位置
+   * 存进了 lastStopPositionSec，但恢复路径原先一律 replayCurrent()（默认 seek=0），
+   * 于是「保存停止前位置」只进了快照，听感上仍然是整首从头开始。
+   *
+   * 位置为 0（没播过、或取不到位置）时退化为从头播，与既有行为一致。
+   */
+  async replayCurrentFromStop(): Promise<boolean> {
+    const from = this.lastStopPositionSec;
+    if (!Number.isFinite(from) || from <= 0) {
+      return this.replayCurrent(0);
+    }
+    songloft.log.info(`[PlaylistManager] Resume after stop, replay with seek=${from.toFixed(1)}s`);
+    return this.replayCurrent(from);
+  }
+
   /** 当前推给设备的流从歌曲第几秒开始（设备上报的 position 需加此值才是曲内绝对位置） */
   getStreamSeekOffsetSec(): number {
     return this.streamSeekOffsetSec;
@@ -1222,6 +1252,8 @@ export class PlaylistManager {
    * 使用已有歌曲列表初始化播放列表（恢复用）
    */
   initWithSongs(songs: Song[], startIndex: number, playMode: PlayMode, playlistId: number): void {
+    // 换了内容：上一次停止的位置属于上一首歌单/歌曲，不能留到这次恢复里。
+    this.lastStopPositionSec = 0;
     this.songs = songs;
     this.totalSongs = songs.length;
     this.currentIndex = (startIndex >= 0 && startIndex < songs.length) ? startIndex : 0;
@@ -1245,6 +1277,7 @@ export class PlaylistManager {
     this.tempArtistQuery = artistName;
     this.pendingTempArtist = '';
     this.state = 'idle';
+    this.lastStopPositionSec = 0;
     this.randomPlayed = new Set();
     this.clearPendingNextIndex();
   }
@@ -1446,6 +1479,9 @@ export class PlaylistManager {
     }
 
     this.clearVoiceSuspend();
+    // 新的一首真的起来了：上一次的停止位置已属于别的歌，留着会让「停止→继续」
+    // 跳到错误位置（跨歌 seek）。它只在同一首歌的停止→恢复之间有意义。
+    this.lastStopPositionSec = 0;
     this.state = 'playing';
     this.hardStopped = false;
     this.pausedPositionSec = 0;
@@ -2275,6 +2311,10 @@ export class PlaylistManager {
       this.landingFailure.reset();
       void this.minaService.textToSpeech(this.accountId, this.deviceId, LANDING_CIRCUIT_BREAK_TTS_TEXT).catch(() => {});
     }
+    // 位置在这里没有可信来源：currentIndex 已指向新歌，而 playStartTimeMs 仍是上一首的，
+    // getPosition() 会算出跨歌的错值。显式清空，避免用户之后按「继续」时跳到上一次
+    // 停止遗留的旧位置——不知道位置时就老老实实从头播。
+    this.lastStopPositionSec = 0;
     this.state = 'stopped';
     this.playStartTimeMs = 0;
     // 自动切歌失败刻意不写快照：规范要求「自动切歌失败则保留上一条有效快照」。

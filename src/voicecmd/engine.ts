@@ -725,7 +725,7 @@ export class VoiceEngine {
   private matchBuiltinStopCommand(query: string): MatchResult | null {
     // 兜底匹配同时覆盖 pause 与 stop：用户即使禁用了相应口令，也要保证「暂停/停止」
     // 这类基本控制可用。命中最长的那个关键词，并按它属于哪一组决定动作类型
-    //（规格第 62 行要求两者区分，不能一律当 stop）。
+    //（规格「语音行为」要求两者区分，不能一律当 stop）。
     const normalizedQuery = query.toLowerCase();
     const all = [...BUILTIN_PAUSE_KEYWORDS, ...BUILTIN_STOP_KEYWORDS];
     const keyword = all
@@ -1791,7 +1791,7 @@ export class VoiceEngine {
    * 执行停止播放
    */
   /**
-   * 暂停播放（规格第 62 行）：保留位置与播放上下文，用户可说「继续播放」原位恢复。
+   * 暂停播放（规格「语音行为」）：保留位置与播放上下文，用户可说「继续播放」原位恢复。
    *
    * 与 executeStop 的区别是语义级的：stop 清空播放上下文（stopped 态，需重新加载歌单），
    * pause 只挂起（paused 态，位置保留）。因此「暂停」类口令必须走这里而不是 stop。
@@ -1861,7 +1861,17 @@ export class VoiceEngine {
       }
     }
 
-    if (status.state === 'stopped' || status.state === 'paused') {
+    if (status.state === 'stopped') {
+      // 停止后的恢复：从停止位置继续（规格「快照范围与生命周期」），不再从头重播。
+      pm.setAnnounceOnSongChange(false);
+      const ok = await pm.replayCurrentFromStop();
+      if (ok) {
+        songloft.log.info('[VoiceEngine] Playback restarted from stop position');
+        return;
+      }
+    }
+
+    if (status.state === 'paused') {
       pm.setAnnounceOnSongChange(false);
       const ok = await pm.replayCurrent();
       if (ok) {
