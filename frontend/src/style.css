@@ -212,6 +212,58 @@ html.webf-engine .sl-select-wrap { width: auto; }
 .sl-list-view:not(.sl-list-view-html) { overflow: hidden; }
 .sl-list-view-html { overflow-y: auto; border-top: 1px solid var(--md-outline-variant); }
 
+/* 自定义可拖动滚动条：覆盖在 SlListView 右侧。WebF 原生滚动条命中区太窄，长歌单里几百首
+   歌很难快速跳位（songloft-org/songloft#469）。命中区 32px 但只画一根 4px 轨道 + 6px 拇指，
+   保持视觉极简。移动端 1.5s 后淡出，桌面常驻。 */
+.miot-scrollbar-shell { position: relative; }
+.miot-scrollbar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 32px;
+  height: 100%;
+  pointer-events: auto;
+  opacity: 0;
+  transition: opacity 200ms;
+}
+.miot-scrollbar-visible { opacity: 1; }
+.miot-scrollbar-track {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  right: 4px;
+  width: 4px;
+  background: var(--md-outline-variant);
+  opacity: 0.3;
+  border-radius: 2px;
+}
+.miot-scrollbar-thumb {
+  position: absolute;
+  right: 3px;
+  width: 6px;
+  border-radius: 3px;
+  background: var(--md-on-surface-variant);
+  opacity: 0.5;
+  cursor: grab;
+}
+.miot-scrollbar-dragging .miot-scrollbar-thumb {
+  background: var(--md-primary);
+  opacity: 0.85;
+  cursor: grabbing;
+}
+.miot-scrollbar-label {
+  position: absolute;
+  right: 36px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: var(--md-inverse-surface);
+  color: var(--md-inverse-on-surface);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
 .search-bar { display: flex; align-items: center; gap: 8px; height: 48px; margin-bottom: 12px; padding: 0 12px; border: 1px solid var(--md-outline-variant); border-radius: var(--md-radius-full); background: var(--md-surface-container-low); color: var(--md-on-surface-variant); }
 .search-bar input, .search-bar .sl-input-native { min-width: 0; flex: 1; outline: 0; }
 /* 同上：装饰只给 HTML 分支，别把 background/border 沾到原生 cupertino 输入框上。 */
