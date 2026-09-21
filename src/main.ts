@@ -111,7 +111,7 @@ async function onInit(): Promise<void> {
   initConversationStream(conversationMonitor);
   voiceEngine = new VoiceEngine(configManager, accountManager, minaService, playlistManagerMap, indexingManager, new AIAnalyzer(), memoryService, groupCoordinator);
 
-  const executor = new TaskExecutor(configManager, accountManager, minaService, playlistManagerMap, indexingManager, conversationMonitor, groupCoordinator);
+  const executor = new TaskExecutor(configManager, accountManager, minaService, playlistManagerMap, indexingManager, conversationMonitor, groupCoordinator, voiceEngine);
   scheduler = new Scheduler(configManager, executor);
 
   // 如果配置中没有语音口令配置，写入默认配置；已有配置时补充新增的默认口令类型

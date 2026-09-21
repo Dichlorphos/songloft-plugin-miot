@@ -62,6 +62,19 @@ function validateTaskParams(action: TaskAction, params: TaskParams): string | nu
       if (!params.playlist_name && !params.playlist_id) {
         return '播放歌单时必须指定歌单名称或ID';
       }
+      // 播放前预设音量：可选；有值时必须在 0-100
+      if (params.volume !== undefined && params.volume !== null) {
+        if (typeof params.volume !== 'number' || params.volume < 0 || params.volume > 100) {
+          return '音量值应在 0-100 之间';
+        }
+      }
+      // 播放时长限制：可选；有值时必须是 1-999 的整数（与 VoiceEngine.setSleepTimer 上限一致）
+      if (params.stop_after_minutes !== undefined && params.stop_after_minutes !== null) {
+        const n = params.stop_after_minutes;
+        if (!Number.isInteger(n) || n < 1 || n > 999) {
+          return '播放时长应为 1-999 分钟的整数';
+        }
+      }
       break;
     case 'stop':
       // 无需额外参数

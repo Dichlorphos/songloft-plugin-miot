@@ -142,7 +142,8 @@ assert.match(selectComponent, /sl-select-empty/);
 assert.match(mainPage, /searchable search-placeholder="搜索歌单"/);
 assert.match(mainPage, /searchText: p\.name/);
 assert.match(scheduleSettings, /searchText: playlist\.name/);
-assert.match(scheduleSettings, /v-model="playlistId"[^>]*searchable search-placeholder="搜索歌单"/);
+// 歌单下拉走 @update:model-value="onPlaylistChange" 而非 v-model，用来切歌单时清 songId
+assert.match(scheduleSettings, /:model-value="playlistId"[^>]*searchable search-placeholder="搜索歌单"/);
 assert.match(scheduleSettings, /v-model="songId"[^>]*searchable search-placeholder="搜索歌曲"/);
 assert.match(voiceSettings, /searchText: p\.name/);
 assert.match(voiceSettings, /external_search_playlist_id"[^>]*searchable search-placeholder="搜索歌单"/);
@@ -565,6 +566,36 @@ assert.match(scheduleSettings, /v-if="!isGlobalAction && !allManaged"/);
 assert.match(scheduleSettings, /if \(!global && !allManaged\.value/);
 // 列表副标题显示中文 label，不是 enable_monitor 这种原始值
 assert.match(scheduleSettings, /\{\{ actionLabel\(task\.action\) \}\}/);
+
+// 定时播放：预设音量 & 播放时长（songloft-org/songloft#476）
+// 前端：仅 play_playlist(_from) 有两个可选参数入口；stop_after_minutes 与
+// voiceEngine.setSleepTimer('time') 上限 999 分钟对齐；列表副标题带上提示。
+assert.match(scheduleSettings, /const presetVolumeEnabled = ref\(false\)/);
+assert.match(scheduleSettings, /const stopAfterMinutes = ref\(''\)/);
+assert.match(scheduleSettings, /isPlayAction && presetVolumeEnabled\.value \? \{ volume: volume\.value \}/);
+assert.match(scheduleSettings, /stopMinutes > 0 \? \{ stop_after_minutes: stopMinutes \}/);
+// 上限 999 与后端 setSleepTimer('time') 保持一致，不能悄悄放宽到 1440
+assert.match(scheduleSettings, /stopMinutesRaw <= 999/);
+assert.doesNotMatch(scheduleSettings, /stopMinutesRaw <= 1440/);
+assert.match(scheduleSettings, /function taskExtras\(task: ScheduledTask\)/);
+assert.match(scheduleSettings, /taskExtras\(task\)/);
+assert.match(scheduleSettings, /播放前预设音量/);
+assert.match(scheduleSettings, /播放时长（分钟，1-999，0 不启用）/);
+
+// 后端 handler：两个字段都是可选的，值越界要给出中文提示
+assert.match(scheduleHandler, /音量值应在 0-100 之间/);
+assert.match(scheduleHandler, /播放时长应为 1-999 分钟的整数/);
+
+// TaskExecutor：预设音量与挂表都要独立可复用（并且 stop_after_minutes 复用 SleepTimer 而非新造 setTimeout）
+const executorSource = fs.readFileSync(path.join(frontendRoot, '../src/schedule/executor.ts'), 'utf8');
+assert.match(executorSource, /private async applyPresetVolume\(target: DeviceTarget, params: TaskParams\)/);
+assert.match(executorSource, /private async applyStopTimer\(target: DeviceTarget, params: TaskParams\)/);
+assert.match(executorSource, /this\.voiceEngine\.setSleepTimer\(target\.accountId, target\.deviceId, 'time', m\)/);
+// main.ts 必须把 voiceEngine 传给 TaskExecutor，否则挂表分支永远走不到
+const mainSource = fs.readFileSync(path.join(frontendRoot, '../src/main.ts'), 'utf8');
+assert.match(mainSource, /new TaskExecutor\([^)]*groupCoordinator, voiceEngine\)/);
+// TaskParams 增加 stop_after_minutes 字段
+assert.match(pluginTypes, /stop_after_minutes\?: number/);
 
 // 歌曲删除（songloft-org/songloft#465）：用户在音箱上听到不想的歌可以直接在插件里删，
 // 不必切回本地歌单模式。三处入口 + 后端一份收口 + 可选"从曲库永久删除"复选框。

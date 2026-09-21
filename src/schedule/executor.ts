@@ -12,6 +12,7 @@ import { IndexingManager } from '../indexing/manager';
 import type { IndexedPlaylist } from '../indexing/manager';
 import { ConversationMonitor } from '../conversation/monitor';
 import { GroupCoordinator } from '../group/coordinator';
+import type { VoiceEngine } from '../voicecmd/engine';
 import type { ScheduledTask, TaskLog, TaskTarget, TaskParams, PlayMode, DeviceConfig } from '../types';
 
 /** 解析后的单个目标设备 */
@@ -33,6 +34,9 @@ export class TaskExecutor {
   private indexingManager: IndexingManager;
   private conversationMonitor: ConversationMonitor;
   private groupCoordinator?: GroupCoordinator;
+  // VoiceEngine 持有跨调用生命周期的 SleepTimer 注册表；定时播放的「播放时长限制」
+  // 复用它挂表，语音"取消定时"/"还剩多久停"能直接接管，无需另建一套。
+  private voiceEngine?: VoiceEngine;
 
   constructor(
     configManager: ConfigManager,
@@ -42,6 +46,7 @@ export class TaskExecutor {
     indexingManager: IndexingManager,
     conversationMonitor: ConversationMonitor,
     groupCoordinator?: GroupCoordinator,
+    voiceEngine?: VoiceEngine,
   ) {
     this.configManager = configManager;
     this.accountManager = accountManager;
@@ -50,6 +55,7 @@ export class TaskExecutor {
     this.indexingManager = indexingManager;
     this.conversationMonitor = conversationMonitor;
     this.groupCoordinator = groupCoordinator;
+    this.voiceEngine = voiceEngine;
   }
 
   /**
@@ -376,8 +382,25 @@ export class TaskExecutor {
       return '';
     };
 
+    // 描述附加选项（预设音量 / 播放时长）；仅在实际生效时展示
+    const describeExtras = (p: TaskParams, timerActive: boolean): string => {
+      const parts: string[] = [];
+      if (typeof p.volume === 'number' && p.volume >= 0 && p.volume <= 100) {
+        parts.push(`音量 ${p.volume}`);
+      }
+      if (timerActive && typeof p.stop_after_minutes === 'number') {
+        parts.push(`${p.stop_after_minutes} 分钟后停`);
+      }
+      return parts.length > 0 ? `（${parts.join('，')}）` : '';
+    };
+
     // 获取或创建设备的播放管理器并开始播放
     const pm = await this.playlistManagerMap.getOrCreate(target.accountId, target.deviceId);
+
+    // 播放前预设音量（可选）：先落目标设备，再 fan-out 分组成员；失败仅告警不阻断，
+    // 用户更在意「歌先响起来」，音量兜底会有下次调整
+    await this.applyPresetVolume(target, params);
+
     const start = await resolveStart(playlist.id);
     // 有明确目标歌曲时按 songId 定位：缓存 index 可能因歌单增删歌曲而错位（#420）
     const ok = start.songId
@@ -400,12 +423,65 @@ export class TaskExecutor {
         if (!retryOk) {
           throw new Error(`播放歌单失败(重试后): ${newPlaylist.name}`);
         }
-        return `播放歌单「${newPlaylist.name}」${describeStart(retryStart)}成功`;
+        const retryExtras = await this.applyStopTimer(target, params);
+        return `播放歌单「${newPlaylist.name}」${describeStart(retryStart)}${describeExtras(params, retryExtras)}成功`;
       }
       throw new Error(`播放歌单失败: ${playlist.name}`);
     }
 
-    return `播放歌单「${playlist.name}」${describeStart(start)}成功`;
+    const extras = await this.applyStopTimer(target, params);
+    return `播放歌单「${playlist.name}」${describeStart(start)}${describeExtras(params, extras)}成功`;
+  }
+
+  /**
+   * 播放前预设目标设备音量（可选）：仅在 params.volume 有值且合法时执行；
+   * fan-out 到分组成员，失败仅告警不阻断播放。
+   */
+  private async applyPresetVolume(target: DeviceTarget, params: TaskParams): Promise<void> {
+    const v = params.volume;
+    if (v === undefined || v === null) return;
+    if (typeof v !== 'number' || v < 0 || v > 100) {
+      songloft.log.warn(`[TaskExecutor] 预设音量越界忽略 device=${target.deviceId} volume=${v}`);
+      return;
+    }
+    try {
+      const ok = await this.minaService.setVolume(target.accountId, target.deviceId, v);
+      if (!ok) {
+        songloft.log.warn(`[TaskExecutor] 预设音量失败 device=${target.deviceId} volume=${v}`);
+        return;
+      }
+      await this.groupCoordinator?.fanOutSetVolume(target.accountId, target.deviceId, v);
+      songloft.log.info(`[TaskExecutor] 已预设播放音量 device=${target.deviceId} volume=${v}`);
+    } catch (e) {
+      songloft.log.warn(`[TaskExecutor] 预设音量异常 device=${target.deviceId}: ${String(e)}`);
+    }
+  }
+
+  /**
+   * 播放成功后挂 SleepTimer（可选）：复用 VoiceEngine 的注册表，语音「取消定时」/
+   * 「还剩多久停」可直接接管；分组场景下 SleepTimer 到期由 pm.stop() 走 fan-out 覆盖组员，
+   * 因此只需给「本次目标设备」挂一次表。
+   * 返回是否成功挂表，供文案渲染判断。
+   */
+  private async applyStopTimer(target: DeviceTarget, params: TaskParams): Promise<boolean> {
+    const m = params.stop_after_minutes;
+    if (m === undefined || m === null) return false;
+    if (!Number.isInteger(m) || m < 1 || m > 999) {
+      songloft.log.warn(`[TaskExecutor] 播放时长越界忽略 device=${target.deviceId} minutes=${m}`);
+      return false;
+    }
+    if (!this.voiceEngine) {
+      songloft.log.warn(`[TaskExecutor] 未注入 VoiceEngine，无法挂播放时长 device=${target.deviceId}`);
+      return false;
+    }
+    try {
+      this.voiceEngine.setSleepTimer(target.accountId, target.deviceId, 'time', m);
+      songloft.log.info(`[TaskExecutor] 已挂播放时长 device=${target.deviceId} minutes=${m}`);
+      return true;
+    } catch (e) {
+      songloft.log.warn(`[TaskExecutor] 挂播放时长失败 device=${target.deviceId}: ${String(e)}`);
+      return false;
+    }
   }
 
   /**
