@@ -47,13 +47,26 @@ function makeCoordinator(options: {
   currentDevice?: string | null;
   isGroup?: boolean;
   sampled?: number | null;
-  playOutcome?: 'succeeded' | 'failed' | 'unknown';
+  playOutcome?: 'dispatched' | 'failed' | 'unknown';
+  // true 时在下发尚未返回前就触发起播确认，模拟「确认快于 await 返回」的极端时序。
+  landedBeforeReturn?: boolean;
 } = {}) {
   const snapshotStorage = memoryStorage();
   const pendingStorage = memoryStorage();
   const snapshotStore = new PlaybackSnapshotStore(snapshotStorage);
   const pendingStore = new PendingContextStore(pendingStorage);
   const calls: string[] = [];
+  // 捕获每次下发的起播确认回调，供测试模拟确认结果。
+  const pendingLandings = new Map<string, (result: 'landed' | 'not-landed' | 'superseded') => void>();
+  const landings = {
+    fire: async (accountId: string, deviceId: string, result: 'landed' | 'not-landed' | 'superseded') => {
+      const cb = pendingLandings.get(`${accountId}:${deviceId}`);
+      if (!cb) throw new Error('no landing callback for ' + accountId + ':' + deviceId);
+      pendingLandings.delete(`${accountId}:${deviceId}`);
+      await cb(result);
+    },
+    landed: async (accountId: string, deviceId: string) => landings.fire(accountId, deviceId, 'landed'),
+  };
   const state: { currentDevice: string | null } = {
     currentDevice: options.currentDevice === undefined ? 'devA' : options.currentDevice,
   };
@@ -90,13 +103,20 @@ function makeCoordinator(options: {
         : { ok: false, reason: 'storage_error' as const };
     },
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async (_accountId, _targetDeviceId, playlistId, song, songIndex, positionSec, mode, _speed) => {
+    playPlaylist: async (accountId, targetDeviceId, playlistId, song, songIndex, positionSec, mode, _speed, onLandingResult) => {
       calls.push(`play:${playlistId}:${song.id}:${songIndex}:${positionSec}:${mode}`);
-      return options.playOutcome ?? 'succeeded';
+      if (onLandingResult) {
+        pendingLandings.set(`${accountId}:${targetDeviceId}`, onLandingResult as never);
+        if (options.landedBeforeReturn) {
+          pendingLandings.delete(`${accountId}:${targetDeviceId}`);
+          await (onLandingResult as (r: 'landed') => void | Promise<void>)('landed');
+        }
+      }
+      return options.playOutcome ?? 'dispatched';
     },
   });
 
-  return { coordinator, snapshotStore, pendingStore, calls, state };
+  return { coordinator, snapshotStore, pendingStore, calls, state, landings };
 }
 
 test('切换写入 pending 并更新当前选择', async () => {
@@ -156,16 +176,57 @@ test('采样失败仍保存旧快照的 pending，接口仍成功', async () => 
   assert.equal(pending?.snapshot.position_sec, 30);
 });
 
-test('继续播放优先消费 pending 并在成功后清除', async () => {
-  const { coordinator, pendingStore, calls } = makeCoordinator();
-  await pendingStore.write({
-    account_id: 'acc1', target_device_id: 'devB', source_revision: 3,
-    snapshot: snapshot(), now: 10_000,
+test('待播放上下文在起播确认后清除：确认失败保留、被打断清除、重复继续不重发', async () => {
+  // === 失败保留 ===
+  {
+    const { coordinator, pendingStore, landings } = makeCoordinator();
+    await pendingStore.write({
+      account_id: 'acc1', target_device_id: 'devB', source_revision: 3, snapshot: snapshot(), now: 10_000,
+    });
+    await coordinator.tryResumePending('acc1', 'devB');
+    await landings.fire('acc1', 'devB', 'not-landed');
+    assert.ok(await pendingStore.read('acc1', 'devB', 10_000), '起播确认失败必须保留 pending，用户才能重试');
+  }
+
+  // === 确认窗口被打断 → 清除 ===
+  {
+    const { coordinator, pendingStore, landings } = makeCoordinator();
+    await pendingStore.write({
+      account_id: 'acc1', target_device_id: 'devB', source_revision: 3, snapshot: snapshot(), now: 10_000,
+    });
+    await coordinator.tryResumePending('acc1', 'devB');
+    await landings.fire('acc1', 'devB', 'superseded');
+    assert.equal(
+      await pendingStore.read('acc1', 'devB', 10_000), null,
+      '本次消费已经结束，pending 残留会在下次继续时把用户拉回旧内容',
+    );
+  }
+
+  // === 确认窗口内重复继续不重发 ===
+  {
+    const { coordinator, pendingStore, calls } = makeCoordinator();
+    await pendingStore.write({
+      account_id: 'acc1', target_device_id: 'devB', source_revision: 3, snapshot: snapshot(), now: 10_000,
+    });
+    const first = await coordinator.tryResumePending('acc1', 'devB');
+    const second = await coordinator.tryResumePending('acc1', 'devB');
+    assert.equal(first.outcome, 'dispatched');
+    assert.equal(second.outcome, 'in-progress', '确认未结算前重复继续不得再次下发');
+    assert.deepEqual(calls, ['play:7:11:2:30:order'], '同一目标只能下发一次');
+  }
+});
+
+test('确认结果早于下发 await 返回时也能正确结算（登记先于下发）', async () => {
+  const { coordinator, pendingStore } = makeCoordinator({
+    playOutcome: 'dispatched',
+    // 下发内同步触发确认，模拟极快路径：若实现把登记放在 await 之后，这里会丢回调。
+    landedBeforeReturn: true,
   });
-  const result = await coordinator.tryResumePending('acc1', 'devB');
-  assert.equal(result.outcome, 'succeeded');
-  assert.deepEqual(calls, ['play:7:11:2:30:order']);
-  assert.equal(await pendingStore.read('acc1', 'devB', 10_000), null);
+  await pendingStore.write({
+    account_id: 'acc1', target_device_id: 'devB', source_revision: 3, snapshot: snapshot(), now: 10_000,
+  });
+  await coordinator.tryResumePending('acc1', 'devB');
+  assert.equal(await pendingStore.read('acc1', 'devB', 10_000), null, '早到的确认成功也必须清除 pending');
 });
 
 test('pending 过期时不消费并报告无上下文', async () => {
@@ -182,7 +243,7 @@ test('pending 过期时不消费并报告无上下文', async () => {
     isGroupDevice: async () => false,
     sampleOnSwitch: async () => ({ ok: true }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => { calls.push('play'); return 'succeeded'; },
+    playPlaylist: async () => { calls.push('play'); return 'dispatched'; },
   });
   const result = await stale.tryResumePending('acc1', 'devB');
   assert.equal(result.outcome, 'none');
@@ -203,7 +264,7 @@ test('取不到歌曲对象时保留 pending 并报告失败', async () => {
     isGroupDevice: async () => false,
     sampleOnSwitch: async () => ({ ok: true }),
     loadSong: async () => null,
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
   const result = await coordinator.tryResumePending('acc1', 'devB');
   assert.equal(result.outcome, 'failed');
@@ -274,7 +335,7 @@ test('电台 pending 按歌曲身份恢复且位置为 0', async () => {
     now: 10_000,
   });
   const result = await coordinator.tryResumePending('acc1', 'devB');
-  assert.equal(result.outcome, 'succeeded');
+  assert.equal(result.outcome, 'dispatched');
   assert.deepEqual(calls, ['play:0:11:2:0:order']);
 });
 
@@ -295,7 +356,7 @@ test('恢复只有命中原 song_id 才恢复位置；回退从 0 开始', async
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
     playPlaylist: async (_accountId, _targetDeviceId, _playlistId, song, songIndex, positionSec, _mode, _speed) => {
       played.push({ songId: song.id, index: songIndex, position: positionSec });
-      return 'succeeded';
+      return 'dispatched';
     },
   });
   await coordinator.tryResumePending('acc1', 'devB');
@@ -319,7 +380,7 @@ test('暂停态切换不采样，沿用状态机出口写好的位置', async ()
     isGroupDevice: async () => false,
     sampleOnSwitch: async () => ({ ok: true }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
   await c.onDeviceSelected('acc1', 'devB');
   assert.deepEqual(calls, []);
@@ -352,7 +413,7 @@ test('设备选择提交后立即返回，慢采样仍在后台完成', async ()
       return { ok: true };
     },
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
 
   const selection = await coordinator.beginDeviceSelection('acc1', 'devB');
@@ -397,7 +458,7 @@ test('同一目标连续选择时，先发任务的晚到 pending 不得覆盖�
       return { ok: true, snapshot: sampled[index] };
     },
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
 
   const first = await coordinator.beginDeviceSelection('acc1', 'devB');
@@ -440,7 +501,7 @@ test('新内容清除后，旧同步任务晚到的 pending 不得回写', async
       return { ok: true };
     },
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
 
   const selection = await coordinator.beginDeviceSelection('acc1', 'devB');
@@ -478,7 +539,7 @@ test('快速连续切换按最新选择落定，源设备取上一个选择', as
     isGroupDevice: async () => false,
     sampleOnSwitch: async () => ({ ok: true }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
 
   const first = coordinator.onDeviceSelected('acc1', 'devB');

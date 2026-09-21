@@ -8,9 +8,9 @@ import * as assert from 'node:assert/strict';
 
 import { resumePendingFirst, resumePendingIfAvailable } from './resume_pending.ts';
 
-test('pending 消费成功时 handled 且报告 succeeded', async () => {
-  const result = await resumePendingFirst({ tryResumePending: async () => ({ outcome: 'succeeded' }) });
-  assert.deepEqual(result, { handled: true, outcome: 'succeeded' });
+test('pending 消费成功时 handled 且报告 dispatched', async () => {
+  const result = await resumePendingFirst({ tryResumePending: async () => ({ outcome: 'dispatched' }) });
+  assert.deepEqual(result, { handled: true, outcome: 'dispatched' });
 });
 
 test('没有有效 pending 时不接管，交回目标原活动上下文', async () => {
@@ -55,7 +55,7 @@ test('共享入口：把账号与设备原样透传给协调器', async () => {
     getCoordinator: () => ({
       async tryResumePending(accountId, deviceId) {
         seen.push([accountId, deviceId]);
-        return { outcome: 'succeeded' as const };
+        return { outcome: 'dispatched' as const };
       },
     }),
     accountId: 'acc1',
@@ -63,7 +63,7 @@ test('共享入口：把账号与设备原样透传给协调器', async () => {
   });
 
   assert.deepEqual(seen, [['acc1', 'devB']]);
-  assert.deepEqual(result, { handled: true, outcome: 'succeeded' });
+  assert.deepEqual(result, { handled: true, outcome: 'dispatched' });
 });
 
 test('共享入口：协调器抛错时仍按 failed 处理，不回退', async () => {

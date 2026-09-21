@@ -8,6 +8,7 @@ import type { PlaylistManager, PlaylistManagerMap } from '../player/manager.ts';
 import type { ConfigManager } from '../config/manager.ts';
 import type { LoadedSong } from './switch_coordinator.ts';
 import type { PlayMode } from '../types.ts';
+import type { LandingResult } from '../player/landing_failure.ts';
 
 
 export interface HostPlaybackDeps {
@@ -66,7 +67,8 @@ export async function isDeviceInGroup(configManager: ConfigManager, accountId: s
 /**
  * 把 pending 上下文下发给目标设备。
  *
- * 命中歌曲对象后按歌单/歌曲/位置/模式下发；成功返回 succeeded。这里复用现有
+ * 命中歌曲对象后按歌单/歌曲/位置/模式下发；受理成功返回 dispatched，最终是否起播
+ * 由 onLandingResult 另行结算。这里复用现有
  * PlaylistManager 的准备与下发能力，不新增切换 API。
  */
 export async function playPendingContext(
@@ -79,7 +81,8 @@ export async function playPendingContext(
   positionSec: number,
   mode: string,
   speed: number,
-): Promise<'succeeded' | 'failed' | 'unknown'> {
+  onLandingResult?: (result: LandingResult) => void | Promise<void>,
+): Promise<'dispatched' | 'failed' | 'unknown'> {
   try {
     const manager = await playlistManagerMap.getOrCreate(accountId, targetDeviceId);
     manager.setAnnounceOnSongChange(false);
@@ -93,8 +96,9 @@ export async function playPendingContext(
       positionSec,
       mode as PlayMode,
       speed,
+      { onLandingResult },
     );
-    return ok ? 'succeeded' : 'failed';
+    return ok ? 'dispatched' : 'failed';
   } catch (e) {
     songloft.log.warn(`[playback_sync] play pending failed: ${String(e)}`);
     return 'unknown';

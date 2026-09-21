@@ -11,7 +11,7 @@ import { getHostBaseUrl, callHostAPI } from '../utils/http';
 import type { PlayState, PlayMode, PlayerStatus, DeviceTargetRef, DeviceGroup } from '../types';
 import type { PlaybackRecorder } from '../playback_sync/recorder';
 import { buildObservation } from '../playback_sync/observation';
-import { decideLandingFailure, isEarlyLandingStop, LandingFailureCounter, LANDING_FAILURE_CIRCUIT_BREAK } from './landing_failure';
+import { decideLandingFailure, isEarlyLandingStop, LandingFailureCounter, LANDING_FAILURE_CIRCUIT_BREAK, type LandingResult } from './landing_failure';
 import { planReloadRestore, decideReloadTakeover, clampStopPosition } from './reload_restore_decision';
 
 /** 分配临时歌单唯一负数 ID（每个设备/歌手各一个，互不冲突） */
@@ -272,6 +272,9 @@ export class PlaylistManager {
   private landingVerifyTimer: any = null; // 定时器ID（起播确认探测，见 LANDING_VERIFY_* 常量）
   // 连续起播失败计数（#466 熔断）：任何一次起播确认成功即清零，契约见 landing_failure.ts。
   private readonly landingFailure = new LandingFailureCounter();
+  // 本次下发等待结算的起播确认回调。每个回调最多结算一次；确认窗口被后续操作打断时
+  // 以 superseded 结算，避免协调器永远等不到结果而把 pending 留在存储里。
+  private landingResultCallback?: (result: LandingResult) => void | Promise<void>;
   private unplayableSongIds: Set<number> = new Set(); // 预取失败的歌曲 id，advanceToNext 遇到直接再跳
   private totalSongs: number = 0;
   private playStartTimeMs: number = 0;  // 当前歌曲开始播放的时间戳(ms)
@@ -490,14 +493,17 @@ export class PlaylistManager {
    * 与 playPlaylistFromSong 的区别：那条路只定位起始歌曲、不起播位置；恢复 pending 必须
    * 带曲内位置，且只有命中原 ID 才允许带位置（规范「歌曲恢复按 ID、索引、首曲回退」）。
    * 电台没有歌单，按单曲上下文直接播放，位置固定 0。
+   *
+   * opts.onLandingResult 由「消费待播放上下文」的调用方传入：起播确认结算时回调一次，
+   * 让协调器据此决定清除还是保留 pending。普通播放不传，行为不变。
    */
-  async gracefulPlay(playlistId: number, song: any, fallbackIndex: number, positionSec: number, mode: PlayMode, speed?: number): Promise<boolean> {
+  async gracefulPlay(playlistId: number, song: any, fallbackIndex: number, positionSec: number, mode: PlayMode, speed?: number, opts?: { onLandingResult?: (result: LandingResult) => void | Promise<void> }): Promise<boolean> {
     const isRadio = song?.type === 'radio';
     const effectiveSpeed = isRadio ? 1 : (typeof speed === 'number' && speed > 0 ? speed : undefined);
     if (isRadio || !Number.isInteger(playlistId) || playlistId <= 0) {
       this.playbackSpeed = effectiveSpeed ?? this.playbackSpeed;
       // 这条路自己就是「消费待播放上下文」，因此显式抑制本次清除。
-      return await this.playWithSongs([song], 0, normalizePlayMode(mode), `单曲: ${song?.title ?? ''}`, '', { consumingPending: true });
+      return await this.playWithSongs([song], 0, normalizePlayMode(mode), `单曲: ${song?.title ?? ''}`, '', { consumingPending: true, onLandingResult: opts?.onLandingResult });
     }
 
     this.stopCheckTimer();
@@ -531,7 +537,7 @@ export class PlaylistManager {
     this.randomPlayed = new Set();
     this.clearPendingNextIndex();
 
-    const ok = await this.playCurrent({ seekSeconds: seek, speed: effectiveSpeed, skipAnnouncement: true });
+    const ok = await this.playCurrent({ seekSeconds: seek, speed: effectiveSpeed, skipAnnouncement: true, onLandingResult: opts?.onLandingResult });
     if (!ok) return false;
 
     await this.persistState();
@@ -543,7 +549,7 @@ export class PlaylistManager {
    * 用于"播放歌手XX的歌"等场景，将跨歌单收集的歌曲作为虚拟播放列表。
    * @param artistQuery - 歌手搜索词，用于重启后恢复
    */
-  async playWithSongs(songs: Song[], startIndex: number, mode: PlayMode, label?: string, artistQuery?: string, opts?: { consumingPending?: boolean }): Promise<boolean> {
+  async playWithSongs(songs: Song[], startIndex: number, mode: PlayMode, label?: string, artistQuery?: string, opts?: { consumingPending?: boolean; onLandingResult?: (result: LandingResult) => void | Promise<void> }): Promise<boolean> {
     await this.notifyNewContent(opts?.consumingPending === true);
     this.stopCheckTimer();
     this.state = 'idle';
@@ -566,7 +572,7 @@ export class PlaylistManager {
     this.randomPlayed = new Set();
     this.clearPendingNextIndex();
 
-    const ok = await this.playCurrent();
+    const ok = await this.playCurrent({ onLandingResult: opts?.onLandingResult });
     if (!ok) {
       songloft.log.error('[PlaylistManager] playWithSongs: failed to play current song');
       return false;
@@ -1096,6 +1102,10 @@ export class PlaylistManager {
    * 清理定时器
    */
   cleanup(): void {
+    // 清理（插件卸载/热重载、设备分组变化）不等于用户操作。先把待结算的起播确认回调摘掉，
+    // 否则 stopCheckTimer 会把它当作「被后续操作打断」，将仍在确认窗口内的 pending 清掉——
+    // 用户明明刚点了继续，重载后却再也恢复不了。摘要后回调悬空，pending 保留到确认或过期。
+    this.landingResultCallback = undefined;
     this.stopCheckTimer();
     this.stopResumePoll();
   }
@@ -1415,7 +1425,7 @@ export class PlaylistManager {
     }
   }
 
-  private async playCurrent(opts?: { seekSeconds?: number; speed?: number; skipAnnouncement?: boolean }): Promise<boolean> {
+  private async playCurrent(opts?: { seekSeconds?: number; speed?: number; skipAnnouncement?: boolean; onLandingResult?: (result: LandingResult) => void | Promise<void> }): Promise<boolean> {
     if (this.currentIndex < 0 || this.currentIndex >= this.songs.length) {
       songloft.log.error('[PlaylistManager] Invalid current index: ' + this.currentIndex);
       return false;
@@ -1524,7 +1534,7 @@ export class PlaylistManager {
     // 起播确认：ubus 报成功≠设备真的拉到了流（例如音源解析失败时后端 502，音箱拉不到会 TTS
     // 「播放失败，换一首试试吧」并停下）。等一小段起播缓冲窗口后回读状态，未起播就跳下一首。
     // 电台不启用：直播流可能长时间处于起播态（duration=0、缓冲慢），误跳无意义（#466）。
-    this.scheduleLandingVerify();
+    this.scheduleLandingVerify(opts?.onLandingResult);
 
     // 状态机出口：起播成功。
     await this.captureSnapshot('playing');
@@ -1539,9 +1549,16 @@ export class PlaylistManager {
    * verifyPushLanded 已在此前把「假失败」判成功——那种情况设备真在播，起播确认能过；
    * 我们要抓的是它抓不到的另一半：ubus 报成功但设备实际没起播。
    */
-  private scheduleLandingVerify(): void {
+  private scheduleLandingVerify(onLandingResult?: (result: LandingResult) => void | Promise<void>): void {
+    // 回调随本次下发登记，绝不能挂成 manager 级全局状态，否则并发下发会串台。
+    this.landingResultCallback = onLandingResult;
     const song = this.getCurrentSong();
-    if (!song || song.type === 'radio' || this.playMode === 'singlePlay') return;
+    if (!song || song.type === 'radio' || this.playMode === 'singlePlay') {
+      // 该类内容不产生起播确认结果；若调用方仍登记了回调，如实结算为 superseded，
+      // 避免回调永远悬空。
+      void this.emitLandingResult('superseded');
+      return;
+    }
     const indexAtLanding = this.currentIndex;
     const songIdAtLanding = song.id;
 
@@ -1561,9 +1578,15 @@ export class PlaylistManager {
    * @param attempt 已完成的探测次数，达到 LANDING_VERIFY_ATTEMPTS 仍未起播则判定失败
    */
   private async verifyPlaybackLanded(indexAtLanding: number, songIdAtLanding: number, attempt: number): Promise<void> {
-    // 期间用户可能切歌/暂停/停止：交给触发那次操作的逻辑处理，这里不再插手
-    if (this.state !== 'playing' || this.currentIndex !== indexAtLanding) return;
-    if ((this.getCurrentSong()?.id ?? 0) !== songIdAtLanding) return;
+    // 期间用户可能切歌/暂停/停止：确认窗口已被打断，如实结算为 superseded 后退出。
+    if (this.state !== 'playing' || this.currentIndex !== indexAtLanding) {
+      await this.emitLandingResult('superseded');
+      return;
+    }
+    if ((this.getCurrentSong()?.id ?? 0) !== songIdAtLanding) {
+      await this.emitLandingResult('superseded');
+      return;
+    }
 
     let status = -1;
     try {
@@ -1573,12 +1596,19 @@ export class PlaylistManager {
       songloft.log.warn('[PlaylistManager] landing verify query failed: ' + String(e));
       // 查询失败按「未确认」处理：真起播了下一轮会读到 status=1；两轮都读不到才判失败
     }
-    if (this.state !== 'playing' || this.currentIndex !== indexAtLanding) return;
-    if ((this.getCurrentSong()?.id ?? 0) !== songIdAtLanding) return;
+    if (this.state !== 'playing' || this.currentIndex !== indexAtLanding) {
+      await this.emitLandingResult('superseded');
+      return;
+    }
+    if ((this.getCurrentSong()?.id ?? 0) !== songIdAtLanding) {
+      await this.emitLandingResult('superseded');
+      return;
+    }
 
     if (status === 1) {
       // 起播成功：清零连续失败计数（熔断阈值只累计连续失败）
       this.landingFailure.recordLanded();
+      await this.emitLandingResult('landed');
       return;
     }
 
@@ -1595,6 +1625,8 @@ export class PlaylistManager {
 
     // 连续 LANDING_VERIFY_ATTEMPTS 次仍未起播：判定为起播失败，走跳歌
     songloft.log.warn(`[PlaylistManager] Landing verify failed after ${LANDING_VERIFY_ATTEMPTS} attempts: status=${status}, treating as unplayable and advancing`);
+    // 先结算给协调器再跳歌：确认失败要保留 pending，用户才能重试这次恢复。
+    await this.emitLandingResult('not-landed');
     // 记为「不可播放」：避免随机模式下 reserveNextIndex 再次抽中同一首、或用户切回时反复卡住
     if (songIdAtLanding > 0) this.unplayableSongIds.add(songIdAtLanding);
     // 上报后端：#466。当前用 played 端点 event=landing_failed；后端后续可据此做临时降权
@@ -1607,6 +1639,23 @@ export class PlaylistManager {
     this.handleLandingFailure({ tts: true }).catch(e => {
       songloft.log.error('[PlaylistManager] handleLandingFailure error: ' + String(e));
     });
+  }
+
+  /**
+   * 结算一次起播确认结果，每个回调最多生效一次。
+   *
+   * landed=确认进入播放；not-landed=两轮均未确认；superseded=确认窗口被打断。
+   * 协调器据此决定清除（landed/superseded）还是保留（not-landed）待播放上下文。
+   */
+  private async emitLandingResult(result: LandingResult): Promise<void> {
+    const callback = this.landingResultCallback;
+    if (!callback) return;
+    this.landingResultCallback = undefined;
+    try {
+      await callback(result);
+    } catch (e) {
+      songloft.log.warn('[PlaylistManager] landing result callback failed: ' + String(e));
+    }
   }
 
   /**
@@ -2103,6 +2152,8 @@ export class PlaylistManager {
       clearTimeout(this.landingVerifyTimer);
       this.landingVerifyTimer = null;
     }
+    // 确认窗口被暂停/切歌/停止/新内容打断：本次消费到此结束，结算给协调器。
+    void this.emitLandingResult('superseded');
   }
 
   // ===== 外部恢复探测（stopped 态检测设备恢复播放） =====

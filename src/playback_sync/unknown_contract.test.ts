@@ -5,7 +5,7 @@
 // 覆盖 unknown 的**真实产生点**——gracefulPlay 抛错（ubus 超时/网络中断）时，
 // playPendingContext 的 catch 分支返回 unknown。
 //
-// 规格「数据契约」中 unknown 的对外报告要求：下发结果使用 succeeded/failed/unknown；unknown 对外报告
+// 规格「数据契约」中 unknown 的对外报告要求：待播放上下文的下发结果使用 dispatched/failed/unknown；unknown 对外报告
 // success:false + outcome:'unknown'，不清除待播放上下文。
 
 import test from 'node:test';

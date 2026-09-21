@@ -9,6 +9,14 @@
 // 边界：自动切歌「硬失败」收尾（advanceToNext 重试后仍失败）不经过本模块——那条路径
 // 不跳歌、直接停播，只借用同一个熔断阈值常量。两者的共同点仅止于阈值。
 
+/** 一次下发的起播确认最终结果。
+ *
+ * - landed：延迟回读确认设备确实进入播放；
+ * - not-landed：两轮回读都未确认，按起播失败处理；
+ * - superseded：确认窗口被后续操作（暂停/切歌/停止/新内容）打断，无法得出结论。
+ */
+export type LandingResult = "landed" | "not-landed" | "superseded";
+
 /** 连续起播失败的熔断阈值：达到即停播并播报长文案。 */
 export const LANDING_FAILURE_CIRCUIT_BREAK = 3;
 

@@ -57,7 +57,7 @@ test('last_selection：当前选择写入失败时返回失败', async () => {
     isGroupDevice: async () => false,
     sampleOnSwitch: async () => ({ ok: true }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
 
   setSwitchCoordinator(coordinator);
@@ -117,7 +117,7 @@ test('last_selection：响应前提交选择，采样留在后台', async () => 
       return { ok: true };
     },
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
 
   setSwitchCoordinator(coordinator);

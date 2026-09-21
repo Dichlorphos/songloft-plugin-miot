@@ -118,8 +118,8 @@ async function onInit(): Promise<void> {
       samplePosition: () => sampleSourcePosition(playlistManagerMap.get(accountId, deviceId), minaService, accountId, deviceId),
     }),
     loadSong: (songId) => loadSongById(songId),
-    playPlaylist: (accountId, targetDeviceId, playlistId, song, songIndex, positionSec, mode, speed) =>
-      playPendingContext(playlistManagerMap, accountId, targetDeviceId, playlistId, song, songIndex, positionSec, mode, speed),
+    playPlaylist: (accountId, targetDeviceId, playlistId, song, songIndex, positionSec, mode, speed, onLandingResult) =>
+      playPendingContext(playlistManagerMap, accountId, targetDeviceId, playlistId, song, songIndex, positionSec, mode, speed, onLandingResult),
     log: (message) => songloft.log.warn(message),
   });
   setSwitchCoordinator(switchCoordinator);

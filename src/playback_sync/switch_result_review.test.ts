@@ -94,7 +94,7 @@ test('跨账号切换只更新选择，不创建同步任务', async () => {
     isGroupDevice: async () => false,
     sampleOnSwitch: async () => ({ ok: true, snapshot: snapshot() }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
 
   const selected = await coordinator.onDeviceSelected('acc1', 'devB', 'acc2');
@@ -118,7 +118,7 @@ test('同账号切换不受 from_account_id 影响，照常同步', async () => 
     isGroupDevice: async () => false,
     sampleOnSwitch: async () => ({ ok: false, reason: 'sample_failed' as const }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
 
   const selected = await coordinator.onDeviceSelected('acc1', 'devB', 'acc1');
@@ -140,7 +140,7 @@ test('首次选择（没有来源账号）不会因空串被误判为跨账号',
     isGroupDevice: async () => false,
     sampleOnSwitch: async () => ({ ok: false, reason: 'sample_failed' as const }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
 
   const selected = await coordinator.onDeviceSelected('acc1', 'devB', '');
@@ -163,7 +163,7 @@ test('设备组判定失败时按设备组跳过同步，不放行', async () =>
     isGroupDevice: async () => { throw new Error('config read failed'); },
     sampleOnSwitch: async () => ({ ok: true, snapshot: snapshot() }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
 
   const result = await coordinator.onDeviceSelected('acc1', 'devB');
@@ -200,7 +200,7 @@ test('pending 读故障时 tryResumePending 报 failed，而不是 none', async 
     isGroupDevice: async () => false,
     sampleOnSwitch: async () => ({ ok: false, reason: 'no_snapshot' as const }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
 
   const result = await coordinator.tryResumePending('acc1', 'devB');
@@ -232,7 +232,7 @@ test('并发继续播放只下发一次（否则会双重起播/串播）', asyn
     isGroupDevice: async () => false,
     sampleOnSwitch: async () => ({ ok: false, reason: 'no_snapshot' as const }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => { plays++; await gate; return 'succeeded'; },
+    playPlaylist: async () => { plays++; await gate; return 'dispatched'; },
   });
 
   const first = coordinator.tryResumePending('acc1', 'devB');
@@ -246,8 +246,8 @@ test('并发继续播放只下发一次（否则会双重起播/串播）', asyn
   // 后到的一路应当如实报告它没有消费到上下文，而不是假装成功
   assert.deepEqual(
     [a.outcome, b.outcome].sort(),
-    ['none', 'succeeded'],
-    '后到的一路必须报告 none，让调用方走正常回退而不是重复下发',
+    ['dispatched', 'in-progress'],
+    '确认窗口内后到的一路必须报告 in-progress，既不得重复下发也不得回退目标原内容',
   );
 });
 
@@ -271,7 +271,7 @@ test('消费期间被「选择新内容」作废后，不得再按旧上下文�
     isGroupDevice: async () => false,
     sampleOnSwitch: async () => ({ ok: false, reason: 'no_snapshot' as const }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => { plays++; await gate; return 'succeeded'; },
+    playPlaylist: async () => { plays++; await gate; return 'dispatched'; },
   });
 
   const resume = coordinator.tryResumePending('acc1', 'devB');
@@ -282,7 +282,7 @@ test('消费期间被「选择新内容」作废后，不得再按旧上下文�
   const result = await resume;
 
   assert.equal(plays, 1, '下发已经开始，无法撤回：这一路确实下发了一次');
-  assert.equal(result.outcome, 'succeeded', '已经下发的这一路如实报告自己的结果');
+  assert.equal(result.outcome, 'dispatched', '已经下发的这一路如实报告「已受理下发」');
   // 关键：作废之后不得再把 pending 当成「还可以继续消费」的东西留下
   assert.equal(await pendingStore.read('acc1', 'devB', 1_000), null, '新内容已清除 pending，消费不得复活它');
 });
@@ -306,7 +306,7 @@ test('被作废的消费不得在原下发之前继续（代际复查）', async
     isGroupDevice: async () => false,
     sampleOnSwitch: async () => ({ ok: false, reason: 'no_snapshot' as const }),
     loadSong: async (songId) => { await loadGate; return { id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }; },
-    playPlaylist: async () => { plays++; return 'succeeded'; },
+    playPlaylist: async () => { plays++; return 'dispatched'; },
   });
 
   const resume = coordinator.tryResumePending('acc1', 'devB');
@@ -340,7 +340,7 @@ test('消费队列在异常后仍可用（一次失败不得卡死后续继续�
     playPlaylist: async () => {
       attempts += 1;
       if (attempts === 1) throw new Error('ubus exploded');
-      return 'succeeded';
+      return 'dispatched';
     },
   });
 
@@ -348,7 +348,7 @@ test('消费队列在异常后仍可用（一次失败不得卡死后续继续�
   assert.equal(first.outcome, 'failed', '第一次抛出按 failed 上报');
   // pending 仍在（失败不得清除），因此第二次应当还能继续消费
   const second = await coordinator.tryResumePending('acc1', 'devB');
-  assert.equal(second.outcome, 'succeeded', '队列必须恢复，第二次继续要能正常消费');
+  assert.equal(second.outcome, 'dispatched', '队列必须恢复，第二次继续要能正常消费');
   assert.equal(attempts, 2);
 });
 
@@ -374,7 +374,7 @@ test('不同目标设备的继续操作互不阻塞', async () => {
     isGroupDevice: async () => false,
     sampleOnSwitch: async () => ({ ok: false, reason: 'no_snapshot' as const }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async (_a, deviceId) => { started.push(deviceId); await gate; return 'succeeded'; },
+    playPlaylist: async (_a, deviceId) => { started.push(deviceId); await gate; return 'dispatched'; },
   });
 
   const b = coordinator.tryResumePending('acc1', 'devB');
@@ -412,7 +412,7 @@ test('采样被判 stale 时改用存储里更新的快照（同一源设备）'
       return { ok: false, reason: 'stale' as const };
     },
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
 
   await coordinator.onDeviceSelected('acc1', 'devB');
@@ -442,7 +442,7 @@ test('采样被判 stale 但更新的是别的源设备时，不得张冠李戴'
       return { ok: false, reason: 'stale' as const };
     },
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
 
   await coordinator.onDeviceSelected('acc1', 'devB');
@@ -468,7 +468,7 @@ test('采样失败（非 stale）仍保留旧快照，不受本改动影响', as
     isGroupDevice: async () => false,
     sampleOnSwitch: async () => ({ ok: false, reason: 'sample_failed' as const }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
 
   await coordinator.onDeviceSelected('acc1', 'devB');
@@ -487,7 +487,7 @@ test('确实没有 pending 时仍返回 none，保持既有回退行为', async 
     isGroupDevice: async () => false,
     sampleOnSwitch: async () => ({ ok: false, reason: 'no_snapshot' as const }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
 
   assert.equal((await coordinator.tryResumePending('acc1', 'devB')).outcome, 'none');
@@ -508,7 +508,7 @@ test('过期 pending 视为 none，不因存储里还有残留而报错', async 
     isGroupDevice: async () => false,
     sampleOnSwitch: async () => ({ ok: false, reason: 'no_snapshot' as const }),
     loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
-    playPlaylist: async () => 'succeeded',
+    playPlaylist: async () => 'dispatched',
   });
 
   assert.equal((await coordinator.tryResumePending('acc1', 'devB')).outcome, 'none');

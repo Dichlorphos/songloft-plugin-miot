@@ -99,8 +99,8 @@ async function buildHarness(options: { groups?: any[]; songMissing?: boolean; pl
         sampleSourcePosition(playlistManagerMap.get(accountId, deviceId), mina, accountId, deviceId),
     }),
     loadSong: (songId) => loadSongById(songId),
-    playPlaylist: (accountId, targetDeviceId, playlistId, song, songIndex, positionSec, mode, speed) =>
-      playPendingContext(playlistManagerMap, accountId, targetDeviceId, playlistId, song, songIndex, positionSec, mode, speed),
+    playPlaylist: (accountId, targetDeviceId, playlistId, song, songIndex, positionSec, mode, speed, onLandingResult) =>
+      playPendingContext(playlistManagerMap, accountId, targetDeviceId, playlistId, song, songIndex, positionSec, mode, speed, onLandingResult),
     log: () => {},
   });
 
@@ -154,21 +154,30 @@ test('集成：切换用源设备物理位置刷新快照（采样 30s）', asyn
   }, { playState: { status: 1, position: 44, duration: 200 } });
 });
 
-test('集成：继续播放才下发 URL，成功后清除 pending', async () => {
+test('集成：继续播放才下发 URL，确认起播成功后才清除 pending', async (t) => {
   await withHarness(async (h) => {
+    // 起播确认是 10s + 8s 的延迟回读；用假时钟推进，避免真等 10 秒。
+    t.mock.timers.enable({ apis: ['setTimeout'] });
     await h.coordinator.onDeviceSelected('acc1', 'devB');
     assert.deepEqual(h.controlCalls, [], '切换阶段不应下发');
 
     const result = await h.coordinator.tryResumePending('acc1', 'devB');
 
-    assert.equal(result.outcome, 'succeeded');
+    assert.equal(result.outcome, 'dispatched');
     assert.equal(h.controlCalls.length, 1, '继续时才下发一次');
     assert.match(h.controlCalls[0], /^playURL:devB:/);
     // 恢复使用固定采样位置：URL 必须带 seek=30
     assert.match(h.controlCalls[0], /seek=30/);
 
-    const pending = await new PendingContextStore(createHostPendingStorage()).read('acc1', 'devB', Date.now());
-    assert.equal(pending, null, '成功起播后清除 pending');
+    // 下发受理不等于设备已拉流：确认成功前必须保留 pending。
+    const store = new PendingContextStore(createHostPendingStorage());
+    assert.ok(await store.read('acc1', 'devB', Date.now()), '起播确认前不得清除 pending');
+
+    // 设备回读 status=1 → 起播确认成功 → 清除 pending。
+    t.mock.timers.tick(10_000);
+    // 确认回调是异步链：多刷几轮宏任务，让 getPlayState → 回调 → 清存储跑完。
+    for (let i = 0; i < 20; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(await store.read('acc1', 'devB', Date.now()), null, '确认起播成功后才清除 pending');
   });
 });
 

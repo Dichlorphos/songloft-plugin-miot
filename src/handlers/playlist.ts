@@ -36,13 +36,13 @@ async function respondWithPendingIfAny(
   });
   if (!decision.handled) return null;
 
-  if (decision.outcome === 'succeeded') {
+  if (decision.outcome === 'dispatched' || decision.outcome === 'in-progress') {
     updateDeviceStatusCache(accountId, deviceId, { state: 'playing', position: manager.getStatus().position });
     return jsonResponse({
       success: true,
       data: {
         ...successData,
-        outcome: 'succeeded',
+        outcome: decision.outcome,
         current_song: manager.getCurrentSong(),
       },
     });

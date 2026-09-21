@@ -13,6 +13,7 @@
 import { PendingContextStore, pendingKey, type PendingContext } from './pending_store.ts';
 import { PlaybackSnapshotStore, type PlaybackSnapshot } from './snapshot_store.ts';
 import type { SwitchSampleResult } from './recorder.ts';
+import type { LandingResult } from '../player/landing_failure.ts';
 
 /** 设备选择结果。切换接口本身始终成功，后台同步失败只记录日志。 */
 export interface SwitchResult {
@@ -28,9 +29,16 @@ export interface DeviceSelectionResult {
   sync: Promise<SwitchResult> | null;
 }
 
-/** 继续播放结果。`none` 表示没有可用的待播放上下文，调用方应回退目标原活动上下文。 */
+/**
+ * 继续播放结果。
+ *
+ * - `dispatched`：待播放上下文已受理并下发，正在等待起播确认（电台/单曲播放没有确认，受理即视为消费完成）；
+ * - `in-progress`：同一条待播放上下文正在等待起播确认，本次重复请求不得再次下发；
+ * - `failed` / `unknown`：本次消费失败或结果未知，保留待播放上下文；
+ * - `none`：没有可用的待播放上下文，调用方应回退目标原活动上下文。
+ */
 export interface ResumePendingResult {
-  outcome: 'succeeded' | 'failed' | 'unknown' | 'none';
+  outcome: 'dispatched' | 'in-progress' | 'failed' | 'unknown' | 'none';
 }
 
 /** 恢复时从宿主取回的歌曲对象；只依赖播放所需字段。 */
@@ -61,7 +69,8 @@ export interface SwitchCoordinatorDeps {
   /** 按 song_id 取回同一播放服务的歌曲对象；取不到返回 null。 */
   loadSong: (songId: number) => Promise<LoadedSong | null>;
   /**
-   * 下发 pending 上下文。返回 true 表示确认起播成功。
+   * 下发 pending 上下文。返回 `dispatched` 只表示下发已被受理，不代表设备已起播；
+   * 起播确认结果通过 onLandingResult 另行结算。
    * song 为命中的原 ID 歌曲；fallback 到其它歌曲时 positionSec 已规整为 0。
    */
   playPlaylist: (
@@ -73,7 +82,8 @@ export interface SwitchCoordinatorDeps {
     positionSec: number,
     mode: string,
     speed: number,
-  ) => Promise<'succeeded' | 'failed' | 'unknown'>;
+    onLandingResult?: (result: LandingResult) => void | Promise<void>,
+  ) => Promise<'dispatched' | 'failed' | 'unknown'>;
   log?: (message: string) => void;
   now?: () => number;
 }
@@ -101,6 +111,10 @@ export class SwitchCoordinator {
   private readonly selectionQueues = new Map<string, Promise<unknown>>();
   // 每个「账号:目标设备」一个同步任务代际；clearPending 递增使旧任务不能回写。
   private readonly contentGenerations = new Map<string, number>();
+  // 每个「账号:目标设备」是否有已下发、正在等待起播确认的消费；用于拦截重复继续。
+  // 用布尔标记而不是代际比较：确认成功清除 pending 会递增代际，否则登记会立刻失效、
+  // 重复继续又能挤进来。
+  private readonly activeResumes = new Set<string>();
 
 
   constructor(deps: SwitchCoordinatorDeps) {
@@ -295,8 +309,8 @@ export class SwitchCoordinator {
   /**
    * 继续播放时优先消费 pending。
    *
-   * 只有确认起播成功才清除 pending；加载失败、下发失败与 unknown 都保留原记录。
-   * 返回 `none` 表示没有有效 pending，调用方回退目标原活动上下文。
+   * 下发受理后返回 `dispatched` 并保留 pending，等起播确认结果再清除；加载失败、
+   * 下发失败与 unknown 都保留原记录。返回 `none` 表示没有有效 pending，调用方回退目标原活动上下文。
    */
   async tryResumePending(accountId: string, targetDeviceId: string): Promise<ResumePendingResult> {
     return this.enqueueResume(accountId, targetDeviceId, () =>
@@ -342,6 +356,11 @@ export class SwitchCoordinator {
     // 记下读取时的内容代际：消费过程中若用户选了新内容（clearPending 递增代际），
     // 手里的旧快照就作废了，不能再推下去。
     const generation = this.contentGenerations.get(pendingKey(accountId, targetDeviceId)) ?? 0;
+    // 同一条 pending 正在等待起播确认时，重复「继续」不得再下发一次，只回答「恢复中」。
+    const key = pendingKey(accountId, targetDeviceId);
+    if (this.activeResumes.has(key)) {
+      return { outcome: 'in-progress' };
+    }
 
     const snapshot = pending.snapshot;
     let song: LoadedSong | null = null;
@@ -365,23 +384,34 @@ export class SwitchCoordinator {
     const hit = song.id === snapshot.song_id;
     const positionSec = hit && snapshot.position_available ? snapshot.position_sec : 0;
     const playlistId = snapshot.content_type === 'playlist' ? snapshot.playlist_id : null;
+    // 电台与单曲播放不启用起播确认（PlaylistManager.scheduleLandingVerify 对二者提前返回），
+    // 这类内容只能沿用「下发受理」作为消费完成条件；其余内容必须等确认结果。
+    const expectsLanding = snapshot.content_type === 'playlist' && snapshot.play_mode !== 'singlePlay';
+    const onLandingResult = expectsLanding
+      ? (result: LandingResult) => this.handleLandingResult(accountId, targetDeviceId, generation, result)
+      : undefined;
+    // 先登记再下发：确认回调可能早于 playPlaylist 的 await 返回触发。
+    if (expectsLanding) this.activeResumes.add(key);
 
     try {
-      if (playlistId === null || playlistId <= 0) {
+      const outcome = playlistId === null || playlistId <= 0
         // 电台：没有歌单，按单曲上下文下发。位置固定 0。
-        const outcome = await this.playPlaylist(accountId, targetDeviceId, 0, song, snapshot.song_index, 0, snapshot.play_mode, snapshot.speed);
-        if (outcome === 'succeeded') {
+        ? await this.playPlaylist(accountId, targetDeviceId, 0, song, snapshot.song_index, 0, snapshot.play_mode, snapshot.speed, onLandingResult)
+        : await this.playPlaylist(accountId, targetDeviceId, playlistId, song, snapshot.song_index, positionSec, snapshot.play_mode, snapshot.speed, onLandingResult);
+
+      if (outcome === 'dispatched') {
+        if (!expectsLanding) {
+          // 电台/单曲播放没有起播确认，受理即视为消费完成。
           await this.pendingStore.clear(accountId, targetDeviceId);
         }
-        return { outcome };
-      }
-
-      const outcome = await this.playPlaylist(accountId, targetDeviceId, playlistId, song, snapshot.song_index, positionSec, snapshot.play_mode, snapshot.speed);
-      if (outcome === 'succeeded') {
-        await this.pendingStore.clear(accountId, targetDeviceId);
+        // expectsLanding 时保留 pending，等确认结果再清除或保留。
+      } else {
+        // 明确失败/未知：本次没有登记中的确认，撤销登记以便用户重试。
+        this.activeResumes.delete(key);
       }
       return { outcome };
     } catch (e) {
+      this.activeResumes.delete(key);
       this.log(`[SwitchCoordinator] resume pending failed: ${String(e)}`);
       return { outcome: 'failed' };
     }
@@ -410,10 +440,40 @@ export class SwitchCoordinator {
     return (this.contentGenerations.get(pendingKey(accountId, targetDeviceId)) ?? 0) === generation;
   }
 
+  /**
+   * 起播确认结算：只有确认成功（或确认窗口被后续操作打断）才清除 pending。
+   *
+   * not-landed 保留 pending，让用户可以直接重试这次恢复；landed 与 superseded 都表示
+   * 本次消费已经结束，此时留着 pending 只会在下次继续时把用户拉回旧内容。
+   */
+  private async handleLandingResult(accountId: string, targetDeviceId: string, generation: number, result: LandingResult): Promise<void> {
+    const key = pendingKey(accountId, targetDeviceId);
+    if (!this.activeResumes.has(key)) return;
+    // 代际已经前进（例如确认窗口内用户选了新内容）时，本次消费早已作废，不得再动存储。
+    if (!this.isGenerationCurrent(accountId, targetDeviceId, generation)) {
+      this.activeResumes.delete(key);
+      return;
+    }
+    // not-landed 保留 pending；登记也同步去掉，让用户可以直接重试这次恢复。
+    if (result === 'not-landed') {
+      this.activeResumes.delete(key);
+      return;
+    }
+    // landed / superseded：清除 pending。登记一直保留到清除完成，否则这段异步窗口里
+    // 重复「继续」会通过 in-progress 检查、读到尚未删除的 pending 再下发一次。
+    try {
+      await this.clearPending(accountId, targetDeviceId);
+    } finally {
+      this.activeResumes.delete(key);
+    }
+  }
+
   /** 选择新内容时清除 pending，并使旧同步任务的晚到写入失效。 */
   async clearPending(accountId: string, targetDeviceId: string): Promise<void> {
     const key = pendingKey(accountId, targetDeviceId);
     this.contentGenerations.set(key, (this.contentGenerations.get(key) ?? 0) + 1);
+    // 正在等待起播确认的消费随之作废：晚到的确认结果不得再动存储。
+    this.activeResumes.delete(key);
     try {
       await this.pendingStore.clear(accountId, targetDeviceId);
     } catch (e) {

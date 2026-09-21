@@ -8,7 +8,7 @@
 // 三处都必须在「目标没有已加载歌单」之前先问这里，否则切到新设备后目标 manager 为空，
 // 用户说「继续播放」会被拒成「没有正在播放的内容」。
 
-export type ResumePendingOutcome = 'succeeded' | 'failed' | 'unknown' | 'none';
+export type ResumePendingOutcome = 'dispatched' | 'in-progress' | 'failed' | 'unknown' | 'none';
 
 export interface PendingResumeDecision {
   /** true 表示待播放上下文已被处理（成功或失败），调用方不应再回退目标原上下文。 */
@@ -25,7 +25,7 @@ export interface ResumePendingDeps {
 /**
  * 明确「继续播放」时优先消费待播放上下文。
  *
- * - `succeeded` / `failed` / `unknown`：上下文存在且已被处理（失败与未知也要如实上报，
+ * - `dispatched` / `in-progress` / `failed` / `unknown`：上下文存在且已被处理（失败与未知也要如实上报，
  *   不能静默回退到目标原上下文，否则用户会听到另一个内容且无法解释）；
  * - `none`：没有可用待播放上下文，交回调用方走目标原活动上下文。
  *

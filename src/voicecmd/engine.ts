@@ -1835,8 +1835,8 @@ export class VoiceEngine {
       log: (m) => songloft.log.warn(m),
     });
     if (decision.handled) {
-      if (decision.outcome === 'succeeded') {
-        songloft.log.info('[VoiceEngine] Pending context resumed');
+      if (decision.outcome === 'dispatched' || decision.outcome === 'in-progress') {
+        songloft.log.info(`[VoiceEngine] Pending context resume outcome=${decision.outcome}`);
         return;
       }
       songloft.log.warn(`[VoiceEngine] Resume pending failed: outcome=${decision.outcome}`);
