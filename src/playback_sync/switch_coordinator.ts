@@ -92,6 +92,10 @@ export class SwitchCoordinator {
   private readonly now: () => number;
   // 每「账号:目标设备」最多一个未完成的切换同步任务；继续操作先等它落定。
   private readonly inFlight = new Map<string, Promise<unknown>>();
+  // 每「账号:目标设备」一条「消费待播放上下文」队列。从读到 pending 到消费完（成功清除）
+  // 之间不能让另一路插进来：否则两路并发继续会各自读到同一条 pending、各自下发一次播放
+  // （用户快速连点，或网页 toggle 与语音 resume 同时到达）。后到的一路拿到 none。
+  private readonly resumeQueues = new Map<string, Promise<unknown>>();
   // 每个账号一条选择写入队列：把「读当前选择 → 写当前选择」串起来，
   // 否则快速连续切换时后发请求可能读到尚未落盘的旧值，或先发的慢写入反过来覆盖新选择。
   private readonly selectionQueues = new Map<string, Promise<unknown>>();
@@ -288,6 +292,30 @@ export class SwitchCoordinator {
    * 返回 `none` 表示没有有效 pending，调用方回退目标原活动上下文。
    */
   async tryResumePending(accountId: string, targetDeviceId: string): Promise<ResumePendingResult> {
+    return this.enqueueResume(accountId, targetDeviceId, () =>
+      this.tryResumePendingLocked(accountId, targetDeviceId));
+  }
+
+  /**
+   * 把一次「消费待播放上下文」串到该目标的消费队列尾部。
+   *
+   * 只在同一「账号 + 目标设备」内串行：不同目标互不影响。前一个任务失败也照常执行下一个，
+   * 队列自身永不 reject，避免一次失败卡死后续继续操作。
+   */
+  private enqueueResume<T>(accountId: string, targetDeviceId: string, task: () => Promise<T>): Promise<T> {
+    const key = pendingKey(accountId, targetDeviceId);
+    const previous = this.resumeQueues.get(key) ?? Promise.resolve();
+    const next = previous.then(task, task);
+    const queue = next.catch(() => undefined);
+    this.resumeQueues.set(key, queue);
+    void queue.finally(() => {
+      if (this.resumeQueues.get(key) === queue) this.resumeQueues.delete(key);
+    }).catch(() => undefined);
+    return next;
+  }
+
+  /** 消费待播放上下文的临界区实现；语义见 tryResumePending。 */
+  private async tryResumePendingLocked(accountId: string, targetDeviceId: string): Promise<ResumePendingResult> {
     await this.waitForInFlight(accountId, targetDeviceId);
     let read;
     try {
@@ -304,6 +332,9 @@ export class SwitchCoordinator {
     }
     if (read.status === 'none') return { outcome: 'none' };
     const pending = read.pending;
+    // 记下读取时的内容代际：消费过程中若用户选了新内容（clearPending 递增代际），
+    // 手里的旧快照就作废了，不能再推下去。
+    const generation = this.contentGenerations.get(pendingKey(accountId, targetDeviceId)) ?? 0;
 
     const snapshot = pending.snapshot;
     let song: LoadedSong | null = null;
@@ -314,6 +345,13 @@ export class SwitchCoordinator {
     }
     if (!song) {
       return { outcome: 'failed' };
+    }
+
+    // 代际复查（下发之前）：加载歌曲期间用户可能已经选了新内容。那时不能再把旧上下文推下去，
+    // 但也不该报失败——目标的活动上下文已经被新内容替换，如实告诉调用方「没有可消费的上下文」。
+    if (!this.isGenerationCurrent(accountId, targetDeviceId, generation)) {
+      this.log('[SwitchCoordinator] pending superseded by new content, skipping resume');
+      return { outcome: 'none' };
     }
 
     // 命中原 ID 才恢复位置；回退到其它歌曲必须从 0 开始（规范「歌曲恢复按 ID…」）。
@@ -340,6 +378,11 @@ export class SwitchCoordinator {
       this.log(`[SwitchCoordinator] resume pending failed: ${String(e)}`);
       return { outcome: 'failed' };
     }
+  }
+
+  /** 内容代际是否仍是消费开始时的那一代；变了说明已被「选择新内容」作废。 */
+  private isGenerationCurrent(accountId: string, targetDeviceId: string, generation: number): boolean {
+    return (this.contentGenerations.get(pendingKey(accountId, targetDeviceId)) ?? 0) === generation;
   }
 
   /** 选择新内容时清除 pending，并使旧同步任务的晚到写入失效。 */

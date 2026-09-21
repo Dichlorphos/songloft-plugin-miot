@@ -309,8 +309,6 @@ export class PlaylistManager {
   private snapshotRecorder?: PlaybackRecorder;
   // 新内容请求回调：播放新歌单/新歌曲前清除 pending 并使旧同步任务失效。
   private newContentHook?: (accountId: string, deviceId: string) => Promise<void>;
-  // gracefulPlay 消费 pending 时置位，避免它自己把正在消费的 pending 清掉。
-  private suppressNewContentHook: boolean = false;
   // 停止前的位置。stop() 会把 pausedPositionSec 清零，快照要用清零前的值。
   private lastStopPositionSec: number = 0;
 
@@ -348,9 +346,15 @@ export class PlaylistManager {
     this.newContentHook = hook;
   }
 
-  /** 新内容请求：先清 pending 再加载/起播；gracefulPlay 消费 pending 时抑制。 */
-  private async notifyNewContent(): Promise<void> {
-    if (this.suppressNewContentHook || !this.newContentHook) return;
+  /**
+   * 新内容请求：先清 pending 再加载/起播。
+   *
+   * `consumingPending` 由**正在消费待播放上下文的那次调用**显式传入。这个抑制状态绝不能
+   * 挂在 manager 上：gracefulPlay 在途期间，任何其它并发请求（用户在别处点了新歌单、
+   * 语音点了新歌）都会被一起抑制，新内容开始播了而旧 pending 还留着。
+   */
+  private async notifyNewContent(consumingPending = false): Promise<void> {
+    if (consumingPending || !this.newContentHook) return;
     try {
       await this.newContentHook(this.accountId, this.deviceId);
     } catch (e) {
@@ -488,54 +492,50 @@ export class PlaylistManager {
    * 电台没有歌单，按单曲上下文直接播放，位置固定 0。
    */
   async gracefulPlay(playlistId: number, song: any, fallbackIndex: number, positionSec: number, mode: PlayMode, speed?: number): Promise<boolean> {
-    this.suppressNewContentHook = true;
-    try {
-      const isRadio = song?.type === 'radio';
-      const effectiveSpeed = isRadio ? 1 : (typeof speed === 'number' && speed > 0 ? speed : undefined);
-      if (isRadio || !Number.isInteger(playlistId) || playlistId <= 0) {
-        this.playbackSpeed = effectiveSpeed ?? this.playbackSpeed;
-        return await this.playWithSongs([song], 0, normalizePlayMode(mode), `单曲: ${song?.title ?? ''}`, '');
-      }
-
-      this.stopCheckTimer();
-      this.state = 'idle';
-      this.playStartTimeMs = 0;
-      this._lastLoadNotFound = false;
-
-      const loaded = await this.loadPlaylistSongs(playlistId);
-      if (!loaded) {
-        songloft.log.error(`[PlaylistManager] gracefulPlay: loadPlaylistSongs failed playlistId=${playlistId}`);
-        return false;
-      }
-      if (this.songs.length === 0) {
-        songloft.log.warn(`[PlaylistManager] gracefulPlay: empty playlist ${playlistId}`);
-        return false;
-      }
-
-      const matched = this.songs.findIndex(s => s.id === song?.id);
-      const hit = matched >= 0;
-      const startIndex = hit
-        ? matched
-        : (Number.isInteger(fallbackIndex) && fallbackIndex >= 0 && fallbackIndex < this.songs.length ? fallbackIndex : 0);
-      const seek = hit ? Math.max(0, positionSec) : 0;
-
-      this.playlistId = playlistId;
-      this.tempPlaylistName = '';
-      this.tempArtistQuery = '';
-      this.pendingTempArtist = '';
-      this.currentIndex = startIndex;
-      this.playMode = normalizePlayMode(mode);
-      this.randomPlayed = new Set();
-      this.clearPendingNextIndex();
-
-      const ok = await this.playCurrent({ seekSeconds: seek, speed: effectiveSpeed, skipAnnouncement: true });
-      if (!ok) return false;
-
-      await this.persistState();
-      return true;
-    } finally {
-      this.suppressNewContentHook = false;
+    const isRadio = song?.type === 'radio';
+    const effectiveSpeed = isRadio ? 1 : (typeof speed === 'number' && speed > 0 ? speed : undefined);
+    if (isRadio || !Number.isInteger(playlistId) || playlistId <= 0) {
+      this.playbackSpeed = effectiveSpeed ?? this.playbackSpeed;
+      // 这条路自己就是「消费待播放上下文」，因此显式抑制本次清除。
+      return await this.playWithSongs([song], 0, normalizePlayMode(mode), `单曲: ${song?.title ?? ''}`, '', { consumingPending: true });
     }
+
+    this.stopCheckTimer();
+    this.state = 'idle';
+    this.playStartTimeMs = 0;
+    this._lastLoadNotFound = false;
+
+    const loaded = await this.loadPlaylistSongs(playlistId);
+    if (!loaded) {
+      songloft.log.error(`[PlaylistManager] gracefulPlay: loadPlaylistSongs failed playlistId=${playlistId}`);
+      return false;
+    }
+    if (this.songs.length === 0) {
+      songloft.log.warn(`[PlaylistManager] gracefulPlay: empty playlist ${playlistId}`);
+      return false;
+    }
+
+    const matched = this.songs.findIndex(s => s.id === song?.id);
+    const hit = matched >= 0;
+    const startIndex = hit
+      ? matched
+      : (Number.isInteger(fallbackIndex) && fallbackIndex >= 0 && fallbackIndex < this.songs.length ? fallbackIndex : 0);
+    const seek = hit ? Math.max(0, positionSec) : 0;
+
+    this.playlistId = playlistId;
+    this.tempPlaylistName = '';
+    this.tempArtistQuery = '';
+    this.pendingTempArtist = '';
+    this.currentIndex = startIndex;
+    this.playMode = normalizePlayMode(mode);
+    this.randomPlayed = new Set();
+    this.clearPendingNextIndex();
+
+    const ok = await this.playCurrent({ seekSeconds: seek, speed: effectiveSpeed, skipAnnouncement: true });
+    if (!ok) return false;
+
+    await this.persistState();
+    return true;
   }
 
   /**
@@ -543,8 +543,8 @@ export class PlaylistManager {
    * 用于"播放歌手XX的歌"等场景，将跨歌单收集的歌曲作为虚拟播放列表。
    * @param artistQuery - 歌手搜索词，用于重启后恢复
    */
-  async playWithSongs(songs: Song[], startIndex: number, mode: PlayMode, label?: string, artistQuery?: string): Promise<boolean> {
-    await this.notifyNewContent();
+  async playWithSongs(songs: Song[], startIndex: number, mode: PlayMode, label?: string, artistQuery?: string, opts?: { consumingPending?: boolean }): Promise<boolean> {
+    await this.notifyNewContent(opts?.consumingPending === true);
     this.stopCheckTimer();
     this.state = 'idle';
     this.playStartTimeMs = 0;

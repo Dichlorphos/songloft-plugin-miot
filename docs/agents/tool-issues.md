@@ -74,6 +74,7 @@
 - 相关链接：`src/playback_sync/switch_integration.test.ts` 的 `withHarness`
 - 复现记录：
   - 2026-09-19：删除 `withHarness` 中的 `h.playlistManagerMap.cleanup()` 即复现进程不退出。
+  - 2026-09-21：新增 `src/player/new_content_suppression.test.ts` 时再次踩到。这次是直接 `new PlaylistManager`（不经 map），因此不适用 `withHarness`；`npm test` 全绿但进程挂住 2 分钟以上不返回。修法是在每个用例的 `finally` 里调 `manager.cleanup()`，之后同一文件 2.6s 内正常退出。教训：**任何直接实例化 `PlaylistManager` 的测试都必须自行 cleanup**，`withHarness` 只覆盖经 map 创建的那条路。
 
 ### 2026-09-19 — 宿主单例 — 测试替换 globalThis.songloft 后单例缓存跨用例串数据
 

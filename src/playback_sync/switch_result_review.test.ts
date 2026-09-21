@@ -192,6 +192,114 @@ test('pending 读故障时 tryResumePending 报 failed，而不是 none', async 
   );
 });
 
+test('并发继续播放只下发一次（否则会双重起播/串播）', async () => {
+  // 用户快速连点「继续播放」，或网页 toggle 与语音 resume 同时到达时，两路都会走到
+  // tryResumePending。若没有互斥，两路都会读到同一条 pending 并各自下发一次播放。
+  const pendingStore = new PendingContextStore(memoryStorage());
+  await pendingStore.write({
+    account_id: 'acc1', target_device_id: 'devB', source_revision: 1, snapshot: snapshot(), now: 1_000,
+  });
+
+  let plays = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const coordinator = new SwitchCoordinator({
+    snapshotStore: new PlaybackSnapshotStore(memoryStorage()),
+    pendingStore,
+    now: () => 1_000,
+    getCurrentDevice: async () => 'devA',
+    setCurrentDevice: async () => {},
+    isGroupDevice: async () => false,
+    sampleOnSwitch: async () => ({ ok: false, reason: 'no_snapshot' as const }),
+    loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
+    playPlaylist: async () => { plays++; await gate; return 'succeeded'; },
+  });
+
+  const first = coordinator.tryResumePending('acc1', 'devB');
+  const second = coordinator.tryResumePending('acc1', 'devB');
+  // 让两路都跑到「已经读到 pending」之后，再放行第一个下发
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  release();
+  const [a, b] = await Promise.all([first, second]);
+
+  assert.equal(plays, 1, '同一目标的并发继续必须只下发一次');
+  // 后到的一路应当如实报告它没有消费到上下文，而不是假装成功
+  assert.deepEqual(
+    [a.outcome, b.outcome].sort(),
+    ['none', 'succeeded'],
+    '后到的一路必须报告 none，让调用方走正常回退而不是重复下发',
+  );
+});
+
+test('消费期间被「选择新内容」作废后，不得再按旧上下文下发', async () => {
+  // clearPending 会把 storage 里的 pending 删掉，但已经读过 pending、正在等着下发的这一路
+  // 手里仍握着快照。若不复查内容代际，它会在新内容已经开始加载之后再把旧上下文推下去。
+  const pendingStore = new PendingContextStore(memoryStorage());
+  await pendingStore.write({
+    account_id: 'acc1', target_device_id: 'devB', source_revision: 1, snapshot: snapshot(), now: 1_000,
+  });
+
+  let plays = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const coordinator = new SwitchCoordinator({
+    snapshotStore: new PlaybackSnapshotStore(memoryStorage()),
+    pendingStore,
+    now: () => 1_000,
+    getCurrentDevice: async () => 'devA',
+    setCurrentDevice: async () => {},
+    isGroupDevice: async () => false,
+    sampleOnSwitch: async () => ({ ok: false, reason: 'no_snapshot' as const }),
+    loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
+    playPlaylist: async () => { plays++; await gate; return 'succeeded'; },
+  });
+
+  const resume = coordinator.tryResumePending('acc1', 'devB');
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  // 下发还没完成，用户先选了新内容
+  await coordinator.onNewContentRequested('acc1', 'devB');
+  release();
+  const result = await resume;
+
+  assert.equal(plays, 1, '下发已经开始，无法撤回：这一路确实下发了一次');
+  assert.equal(result.outcome, 'succeeded', '已经下发的这一路如实报告自己的结果');
+  // 关键：作废之后不得再把 pending 当成「还可以继续消费」的东西留下
+  assert.equal(await pendingStore.read('acc1', 'devB', 1_000), null, '新内容已清除 pending，消费不得复活它');
+});
+
+test('被作废的消费不得在原下发之前继续（代际复查）', async () => {
+  // 与上一条的区别：这里的 playPlaylist 还没开始，代际已变，必须直接放弃。
+  const pendingStore = new PendingContextStore(memoryStorage());
+  await pendingStore.write({
+    account_id: 'acc1', target_device_id: 'devB', source_revision: 1, snapshot: snapshot(), now: 1_000,
+  });
+
+  let plays = 0;
+  let allowLoad!: () => void;
+  const loadGate = new Promise<void>((resolve) => { allowLoad = resolve; });
+  const coordinator = new SwitchCoordinator({
+    snapshotStore: new PlaybackSnapshotStore(memoryStorage()),
+    pendingStore,
+    now: () => 1_000,
+    getCurrentDevice: async () => 'devA',
+    setCurrentDevice: async () => {},
+    isGroupDevice: async () => false,
+    sampleOnSwitch: async () => ({ ok: false, reason: 'no_snapshot' as const }),
+    loadSong: async (songId) => { await loadGate; return { id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }; },
+    playPlaylist: async () => { plays++; return 'succeeded'; },
+  });
+
+  const resume = coordinator.tryResumePending('acc1', 'devB');
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  // 此时卡在 loadSong 里，还没下发
+  await coordinator.onNewContentRequested('acc1', 'devB');
+  allowLoad();
+  const result = await resume;
+
+  assert.equal(plays, 0, '代际已变且尚未下发时，必须放弃这次消费');
+  assert.equal(result.outcome, 'none', '如实报告「没有可消费的上下文」，让调用方走新内容的正常路径');
+});
+
 test('确实没有 pending 时仍返回 none，保持既有回退行为', async () => {
   const coordinator = new SwitchCoordinator({
     snapshotStore: new PlaybackSnapshotStore(memoryStorage()),

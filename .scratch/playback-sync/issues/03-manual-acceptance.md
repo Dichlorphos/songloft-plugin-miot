@@ -4,13 +4,13 @@ Type: task
 Status: ready-for-human
 Blocked by: 01, 02
 Release gate: 阻塞播放同步相关版本发布；不阻塞后续开发
-验收对象：截至 2026-09-19 的播放同步实现（`3bbc4e9`）与播放路径后续改动（Music API 开关 `bb589c5`、不可播放自动跳过 `be80630`）。**2026-09-20 补充**：补齐自动化测试时改动了播放与语音代码（`#466` 起播失败判定抽成 `src/player/landing_failure.ts`、语音 pause/stop 分离、旧口令迁移）。**2026-09-21 补充**：重启恢复改为硬条件判据（`playing` 锚点必须有「设备确实还在放我们这条流」的硬证据才接管，否则钉死 `stopped`；`paused`/`stopped` 只还原本地状态）+ `clean_shutdown` 异常终止否决，并让停止位置活过重启。**2026-09-21 评审整改补充**：新增 `src/playback_sync/envelope_store.ts`（两个存储键共用信封机制）与 `src/player/reload_restore_decision.ts`（重启恢复判定抽成纯函数）；跨账号切换改为前端上报 `from_account_id` 并在后端跳过同步、设备组判定失败保守跳过、pending 读故障不再静默回退、坏数据补诊断日志、清洁停机标记改为「清除并回读确认」、快照写入加出口序号守卫。entryHash 刷新为 `3747e19a…`；受影响的 A5（跨账号）、B1/B2（设备组判定失败）、C4（pending 读故障）、F1–F4（存储键与坏数据）、G5/G6（清洁停机标记）、G7（停止位置）须重测，其余项沿用先前结论。
+验收对象：截至 2026-09-19 的播放同步实现（`3bbc4e9`）与播放路径后续改动（Music API 开关 `bb589c5`、不可播放自动跳过 `be80630`）。**2026-09-20 补充**：补齐自动化测试时改动了播放与语音代码（`#466` 起播失败判定抽成 `src/player/landing_failure.ts`、语音 pause/stop 分离、旧口令迁移）。**2026-09-21 补充**：重启恢复改为硬条件判据（`playing` 锚点必须有「设备确实还在放我们这条流」的硬证据才接管，否则钉死 `stopped`；`paused`/`stopped` 只还原本地状态）+ `clean_shutdown` 异常终止否决，并让停止位置活过重启。**2026-09-21 评审整改补充**：新增 `src/playback_sync/envelope_store.ts`（两个存储键共用信封机制）与 `src/player/reload_restore_decision.ts`（重启恢复判定抽成纯函数）；跨账号切换改为前端上报 `from_account_id` 并在后端跳过同步、设备组判定失败保守跳过、pending 读故障不再静默回退、坏数据补诊断日志、清洁停机标记改为「清除并回读确认」、快照写入加出口序号守卫。entryHash 刷新为 `3747e19a…`（2026-09-21 第三轮整改后）；受影响的 A5（跨账号）、B1/B2（设备组判定失败）、C4（pending 读故障）、F1–F4（存储键与坏数据）、G5/G6（清洁停机标记）、G7（停止位置）须重测，其余项沿用先前结论。**2026-09-21 第三轮补充**：并发消费互斥、消费期间的内容代际复查、`suppressNewContentHook` 改逐次传参，均影响 G1–G3（toggle/resume 优先消费待播放上下文）与 C3/C4 的并发语义，这几项须一并重测。
 
 ## 目的
 
 自动化验证已经覆盖纯逻辑、宿主集成、前端合同与构建，但无法代替真实 MIoT 设备、真实网络、真实存储和真实播放服务。本票据把 spec 的「真机验收」拆成可执行清单；`Status: done` 只表示实现与自动化验证完成，不代表本票据通过。
 
-自动化验证现状（2026-09-21 评审整改后）：`npm test` **227 项**通过、`npm run typecheck`、`node frontend/tests/run.mjs`、`npm run build` 通过。本次新增 `src/player/reload_restore_guard.test.ts`（14 项）锁定重启恢复的硬条件判据与清洁停机标记；`src/player/reload_restore_decision.test.ts`（19 项）直接覆盖恢复判定的每条规则；`src/playback_sync/envelope_diagnostics.test.ts`（12 项）覆盖坏数据诊断、存储读故障与出口序号守卫；`src/playback_sync/switch_result_review.test.ts`（9 项）覆盖跨账号、设备组保守跳过与 pending 读故障。本次补齐了此前零覆盖的 I1–I6、D4（unknown 真实链路）、H1/H3（Music API 开关判定）、快照出口接线断言；G4 的 pause/stop 分离已按规格实现。真机结果必须以实际观察和证据为准，不得用自动化结果代替。
+自动化验证现状（2026-09-21 评审整改后）：`npm test` **234 项**通过、`npm run typecheck`、`node frontend/tests/run.mjs`、`npm run build` 通过。本次新增 `src/player/reload_restore_guard.test.ts`（14 项）锁定重启恢复的硬条件判据与清洁停机标记；`src/player/reload_restore_decision.test.ts`（19 项）直接覆盖恢复判定的每条规则；`src/playback_sync/envelope_diagnostics.test.ts`（12 项）覆盖坏数据诊断、存储读故障与出口序号守卫；`src/playback_sync/switch_result_review.test.ts`（9 项）覆盖跨账号、设备组保守跳过与 pending 读故障。本次补齐了此前零覆盖的 I1–I6、D4（unknown 真实链路）、H1/H3（Music API 开关判定）、快照出口接线断言；G4 的 pause/stop 分离已按规格实现。真机结果必须以实际观察和证据为准，不得用自动化结果代替。
 
 ## 验收边界
 
