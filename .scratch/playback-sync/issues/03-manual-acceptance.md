@@ -106,3 +106,5 @@ Release gate: 阻塞播放同步相关版本发布；不阻塞后续开发
   - 刷新验收对象：并发消费互斥、消费期间的内容代际复查、`suppressNewContentHook` 逐次传参、采样 `stale` 后重读当前快照，以及新增的 toggle 失败分支与配置校验响应契约测试。
   - `npm test` 244 项通过。
   - G1–G3（toggle/resume 优先消费待播放上下文）与 A1–A4、E1（切换后的内容与位置）须连同上述改动一并重测。
+
+- 2026-09-21（第五轮排查）：发现「待播放上下文在下发受理后即被清除，而不是等确认起播成功」（规格第 47 行），已登记为 [04-landing-confirm-before-clear.md](04-landing-confirm-before-clear.md)，状态 `needs-triage`。该问题会让起播失败时丢掉本应保留的恢复上下文，**在修复前发布门禁维持阻塞**；G2/G3 与 I1–I3 的真机验收应连同该票据一并确认。
