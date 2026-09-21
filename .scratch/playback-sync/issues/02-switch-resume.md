@@ -46,3 +46,17 @@ Blocked by: 01
 - 2026-09-19（两轴评审后采纳）：目标设备复合键统一复用 `pendingKey`；每次设备选择也递增同步代际，避免同一目标连续选择时先发任务的晚到 pending 覆盖后发任务。
 
 - 2026-09-19：真机验收拆为独立票据 [03-manual-acceptance.md](03-manual-acceptance.md)，状态 `ready-for-human`，作为播放同步相关版本的发布门禁。本票据的 `done` 仍只代表实现与自动化验证完成；真机未通过不得解除门禁，也不得据此宣称验收完成。
+
+- 2026-09-21（真机验收前加严评审，已采纳）：本轮两轴评审后集中整改，全部带回归测试。
+  - **跨账号切换**：`cross_account` 原先只在 reason 联合里声明、从不产出——后端拿目标账号读「源设备」，从 A 切到 B 会解析成 B 自己的旧选择。现由前端上报 `from_account_id`，协调器据此识别跨账号：只更新选择、不创建同步任务。
+  - **设备组判定失败**：`isDeviceInGroup` 原先把读配置异常吞成 `false`（等于宣称「这是独立设备」），现改为抛出，协调器按「无法排除设备组」保守跳过。
+  - **pending 读故障**：原先 `loadEnvelope` 把存储异常也当成「没有数据」，`tryResumePending` 因此返回 `none`，调用方会静默回退目标原上下文并可能报成功。现区分「没有」与「读不了」，后者如实报 `failed`。
+  - **pending 内层快照**：原先只校验 `snapshot` 是对象，坏副本会一路带到恢复路径；现复用 `isValidSnapshot` 全字段校验，并要求副本与条目同账号。
+  - **坏数据诊断**：单条坏数据原先静默丢弃，现按 spec 第 74 行逐条记录诊断日志（含来源前缀与丢弃条数）。
+  - **存储读故障下的写入**：原先会按空信封继续写，把整封信封（含其它账号）覆盖掉；现改为写入失败且不落盘。
+  - **快照出口顺序**：出口写入原先不携带任何顺序信息，迟到的旧出口可能盖掉更新的状态；现由 recorder 在出口处同步递增序号，存储拒绝更小序号的迟到写入。
+  - **信封机制重复**：两个 store 逐行同形的信封读写抽到 `src/playback_sync/envelope_store.ts`，各自只保留键、schema 与条目校验。
+  - **继续播放入口重复**：三条路（网页 toggle、网页 resume、语音/AI resume）各自重复的「取协调器 + 分支」收进 `resume_pending.ts` 的 `resumePendingIfAvailable` 与 playlist handler 的 `respondWithPendingIfAny`。
+  - **`playPendingContext` 类型**：原先 `song: any` + `gracefulPlay` 可选能力探测，现改用 `LoadedSong`/`PlayMode` 并直接调用真实公开方法。
+  - **重启恢复职责**：判定规则从 `manager.ts` 的异步流程抽到 `src/player/reload_restore_decision.ts` 纯函数，每条规则可直接喂输入验证。
+  - 验证：`npm test` 227 项通过、`npm run typecheck`、`node frontend/tests/run.mjs`、`npm run build`（entryHash `3747e19a…`）。

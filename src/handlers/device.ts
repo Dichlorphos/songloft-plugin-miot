@@ -255,7 +255,7 @@ export function registerDeviceHandlers(
   router.post('/mina/last_selection', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
-      const { account_id, device_id } = body;
+      const { account_id, device_id, from_account_id } = body;
       if (!account_id) {
         return jsonResponse({ success: false, error: 'account_id is required' });
       }
@@ -264,9 +264,10 @@ export function registerDeviceHandlers(
       }
       // 切换入口：先同步提交当前选择，确保响应返回时读设备状态已是新设备；
       // 采样与 pending 写入在后台继续，同步失败由日志和后续继续操作报告。
+      // from_account_id 是请求开始前界面选中的账号；跨账号时只更新选择、不创建同步任务。
       const coordinator = getSwitchCoordinator();
       if (coordinator) {
-        const selected = await coordinator.beginDeviceSelection(account_id, device_id);
+        const selected = await coordinator.beginDeviceSelection(account_id, device_id, typeof from_account_id === 'string' ? from_account_id : undefined);
         if (!selected.success) {
           return jsonResponse({ success: false, error: 'failed to update last selection' });
         }

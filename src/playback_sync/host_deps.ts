@@ -6,6 +6,8 @@
 
 import type { PlaylistManager, PlaylistManagerMap } from '../player/manager.ts';
 import type { ConfigManager } from '../config/manager.ts';
+import type { LoadedSong } from './switch_coordinator.ts';
+import type { PlayMode } from '../types.ts';
 
 
 export interface HostPlaybackDeps {
@@ -48,16 +50,17 @@ export async function loadSongById(songId: number): Promise<any | null> {
   }
 }
 
-/** 设备是否属于一个 ≥2 成员的设备组；组成员完全跳过同步。 */
+/**
+ * 设备是否属于一个 ≥2 成员的设备组；组成员完全跳过同步。
+ *
+ * 读配置失败时**抛出**，由调用方按「无法排除设备组」保守跳过。绝不能返回 false：
+ * 那等于宣称「这是独立设备」，会把设备组当成独立设备产生跨设备上下文。
+ */
 export async function isDeviceInGroup(configManager: ConfigManager, accountId: string, deviceId: string): Promise<boolean> {
-  try {
-    const groups = await configManager.getDeviceGroups();
-    return groups.some(g =>
-      Array.isArray(g?.members) && g.members.length >= 2 &&
-      g.members.some(m => m?.account_id === accountId && m?.device_id === deviceId));
-  } catch {
-    return false;
-  }
+  const groups = await configManager.getDeviceGroups();
+  return groups.some(g =>
+    Array.isArray(g?.members) && g.members.length >= 2 &&
+    g.members.some(m => m?.account_id === accountId && m?.device_id === deviceId));
 }
 
 /**
@@ -71,7 +74,7 @@ export async function playPendingContext(
   accountId: string,
   targetDeviceId: string,
   playlistId: number,
-  song: any,
+  song: LoadedSong,
   songIndex: number,
   positionSec: number,
   mode: string,
@@ -83,16 +86,14 @@ export async function playPendingContext(
 
     // 目标设备可能持有不同的歌单：只要它能加载到该歌曲就按 pending 恢复。
     const targetPlaylistId = Number.isInteger(playlistId) && playlistId > 0 ? playlistId : 0;
-    const control = manager as PlaylistManager & {
-      gracefulPlay?: (playlistId: number, song: any, songIndex: number, positionSec: number, mode: string, speed: number) => Promise<boolean>;
-    };
-
-    if (typeof control.gracefulPlay === 'function') {
-      const ok = await control.gracefulPlay(targetPlaylistId, song, songIndex, positionSec, mode as any, speed);
-      return ok ? 'succeeded' : 'failed';
-    }
-
-    const ok = await manager.playPlaylistFromSong(targetPlaylistId, song.id, mode as any, songIndex);
+    const ok = await manager.gracefulPlay(
+      targetPlaylistId,
+      song,
+      songIndex,
+      positionSec,
+      mode as PlayMode,
+      speed,
+    );
     return ok ? 'succeeded' : 'failed';
   } catch (e) {
     songloft.log.warn(`[playback_sync] play pending failed: ${String(e)}`);

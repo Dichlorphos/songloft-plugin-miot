@@ -64,6 +64,14 @@ export class PlaybackRecorder {
   private readonly store: PlaybackSnapshotStore;
   private readonly now: () => number;
   private readonly log: (message: string) => void;
+  /**
+   * 出口序号：每次状态机出口观测同步递增。
+   *
+   * 出口按真实状态变更顺序发生，写入却是异步的；把这里的序号一起交给存储，迟到的旧出口
+   * 就会被拒绝，而不是把已经落盘的新状态盖回旧状态。序号只在进程内有效——重启后不存在
+   * 在途写入，从零开始即可。
+   */
+  private nextOrder = 0;
 
   constructor(store: PlaybackSnapshotStore, options: PlaybackRecorderOptions = {}) {
     this.store = store;
@@ -80,7 +88,9 @@ export class PlaybackRecorder {
     const payload = this.toSnapshotPayload(observation);
     if (!payload) return false;
 
-    const result = await this.store.write(payload);
+    // 序号必须在 await 之前取：它代表这次出口在状态变更序列里的位置（先到先得）。
+    const order = this.nextOrder++;
+    const result = await this.store.write(payload, order);
     if (!result.ok) {
       this.log(`[PlaybackRecorder] snapshot write skipped reason=${result.reason}`);
       return false;
@@ -98,6 +108,7 @@ export class PlaybackRecorder {
     if (!current) {
       return { ok: false, reason: 'no_snapshot' };
     }
+    // 采样是在当前快照之上刷新位置，取新序号即可。
 
     const position = await this.sampleWithTimeout(request.samplePosition, request.timeoutMs ?? SAMPLE_TIMEOUT_MS);
     if (position === null) {
@@ -110,7 +121,7 @@ export class PlaybackRecorder {
       position_available: true,
       updated_at: this.now(),
       base_revision: current.revision,
-    });
+    }, this.nextOrder++);
 
     if (!result.ok) {
       return { ok: false, reason: result.reason === 'stale' ? 'stale' : 'storage_error' };

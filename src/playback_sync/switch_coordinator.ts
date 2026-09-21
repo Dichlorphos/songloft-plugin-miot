@@ -18,7 +18,7 @@ import type { SwitchSampleResult } from './recorder.ts';
 export interface SwitchResult {
   success: boolean;
   synced: boolean;
-  reason?: 'no_source' | 'same_device' | 'cross_account' | 'group' | 'no_snapshot' | 'sampled' | 'storage_error';
+  reason?: 'no_source' | 'same_device' | 'group' | 'no_snapshot' | 'sampled' | 'storage_error';
 }
 
 /** 设备选择提交结果；选择写入成功即 true，完整同步任务由 sync 表示。 */
@@ -117,8 +117,18 @@ export class SwitchCoordinator {
    *
    * 该 Promise 只等到「当前选择」成功写入后 resolve；采样与写 pending 仍在后台执行，
    * 由 `tryResumePending` 等待。这样接口返回后读取设备状态不会看到旧选择。
+   *
+   * `fromAccountId` 是请求开始前界面上选中的账号。它只在**跨账号**时才由调用方提供：
+   * 那时源设备属于另一个账号，本账号的「当前选择」与本次切换无关，因此只更新选择、
+   * 不创建任何同步任务（规范：跨账号切换不把源账号快照写入目标账号）。
    */
-  async beginDeviceSelection(accountId: string, targetDeviceId: string): Promise<DeviceSelectionResult> {
+  async beginDeviceSelection(
+    accountId: string,
+    targetDeviceId: string,
+    fromAccountId?: string,
+  ): Promise<DeviceSelectionResult> {
+    // 跨账号：源设备在别的账号下，本账号无从采样，也不该给目标设备排队任何上下文。
+    const crossAccount = typeof fromAccountId === 'string' && fromAccountId !== '' && fromAccountId !== accountId;
     if (!accountId || !targetDeviceId) return { success: false, sync: null };
 
     let sourceDeviceId: string | null = null;
@@ -140,6 +150,9 @@ export class SwitchCoordinator {
       return { success: false, sync: null };
     }
 
+    // 跨账号切换到此为止：选择已提交，但没有可同步的源设备。
+    if (crossAccount) return { success: true, sync: null };
+
     // 选择已经提交；后续同步失败不得回滚选择，也不得阻塞接口。
     // 每次新选择也递增代际：同一目标连续两次选择时，先发任务的晚到 pending 不得覆盖后发任务。
     const key = pendingKey(accountId, targetDeviceId);
@@ -159,8 +172,8 @@ export class SwitchCoordinator {
    * HTTP 入口用 `beginDeviceSelection`，避免采样拖慢响应；此方法保留给测试与需要
    * 精确同步结果的调用方。
    */
-  async onDeviceSelected(accountId: string, targetDeviceId: string): Promise<SwitchResult> {
-    const selected = await this.beginDeviceSelection(accountId, targetDeviceId);
+  async onDeviceSelected(accountId: string, targetDeviceId: string, fromAccountId?: string): Promise<SwitchResult> {
+    const selected = await this.beginDeviceSelection(accountId, targetDeviceId, fromAccountId);
     if (!selected.success) return { success: false, synced: false, reason: 'storage_error' };
     if (!selected.sync) return { success: true, synced: false, reason: 'no_source' };
     return await selected.sync;
@@ -207,12 +220,15 @@ export class SwitchCoordinator {
     if (!sourceDeviceId) return { success: true, synced: false, reason: 'no_source' };
     if (sourceDeviceId === targetDeviceId) return { success: true, synced: false, reason: 'same_device' };
 
+    // 设备组必须完全跳过同步。判定本身失败时无法排除「这是设备组」，因此保守跳过：
+    // 放行的代价是把组内设备当成独立设备、产生本不该有的跨设备上下文。
     try {
       if (await this.isGroupDevice(accountId, sourceDeviceId) || await this.isGroupDevice(accountId, targetDeviceId)) {
         return { success: true, synced: false, reason: 'group' };
       }
     } catch (e) {
-      this.log(`[SwitchCoordinator] group check failed: ${String(e)}`);
+      this.log(`[SwitchCoordinator] group check failed, skipping sync: ${String(e)}`);
+      return { success: true, synced: false, reason: 'group' };
     }
 
     const snapshot = await this.snapshotStore.read(accountId);
@@ -273,14 +289,21 @@ export class SwitchCoordinator {
    */
   async tryResumePending(accountId: string, targetDeviceId: string): Promise<ResumePendingResult> {
     await this.waitForInFlight(accountId, targetDeviceId);
-    let pending: PendingContext | null = null;
+    let read;
     try {
-      pending = await this.pendingStore.read(accountId, targetDeviceId, this.now());
+      read = await this.pendingStore.readWithStatus(accountId, targetDeviceId, this.now());
     } catch (e) {
       this.log(`[SwitchCoordinator] pending read failed: ${String(e)}`);
-      return { outcome: 'none' };
+      return { outcome: 'failed' };
     }
-    if (!pending) return { outcome: 'none' };
+    // 存储读不了不等于「没有待播放上下文」：当成没有会静默回退到目标原活动上下文，
+    // 播成另一个内容还报告成功。宁可如实报失败。
+    if (read.status === 'error') {
+      this.log(`[SwitchCoordinator] pending read error, refusing to fall back: ${read.message}`);
+      return { outcome: 'failed' };
+    }
+    if (read.status === 'none') return { outcome: 'none' };
+    const pending = read.pending;
 
     const snapshot = pending.snapshot;
     let song: LoadedSong | null = null;

@@ -255,12 +255,47 @@ export class ConfigManager {
     } catch (e) {
       return false;
     }
-    try {
-      await songloft.storage.delete(STORAGE_KEY_CLEAN_SHUTDOWN);
-    } catch (e) {
-      // 清不掉也只能继续：标记留着会让下次启动误判为异常终止，代价是多一次不自动续播
+    // 标记是一次性的：只有确认它已经不再躺在存储里，才能相信「上次确实正常停机」。
+    // 只删一次是不够的——删除可能失败，而失败的删除会把一个陈旧的 true 留给下一次启动；
+    // 那次启动（存储已恢复）就会把它当成本次停机正常，放行一次本该被拒绝的接管。
+    // 因此这里必须**清掉并回读确认**；确认不了就保守按异常终止处理。
+    if (!(await this.clearCleanShutdownFlag())) {
+      songloft.log.warn('[ConfigManager] 清洁停机标记无法确认清除，本次按异常终止处理（不自动续播）');
+      return false;
     }
     return raw === true || raw === 'true';
+  }
+
+  /**
+   * 清除清洁停机标记。
+   *
+   * 返回 true 仅当**确实删掉**了标记，且回读确认它已不再是可信的清洁停机值。
+   *
+   * 删除失败时即使改写成功也返回 false：本次一律按异常终止处理。改写只是尽力而为——
+   * 把陈旧值改成 `consumed`（标记只判 `=== true || === 'true'`）能让「之后那次崩溃」
+   * 的启动不再读到 true。但若删除与改写都失败（存储整体不可写），存储里会残留一个 true；
+   * 这是已知残余限制：那种极端情况下无法让一次性标记失效，只能保证本次不放行。
+   */
+  private async clearCleanShutdownFlag(): Promise<boolean> {
+    let removed = false;
+    try {
+      await songloft.storage.delete(STORAGE_KEY_CLEAN_SHUTDOWN);
+      removed = true;
+    } catch (e) {
+      // 删不掉：尽力改写成不可信值，别把这个陈旧 true 留给下一次启动
+      try {
+        await songloft.storage.set(STORAGE_KEY_CLEAN_SHUTDOWN, 'consumed');
+      } catch (e2) {
+        // 存储整体不可写，连失效改写也做不到（见上方已知残余限制）
+      }
+    }
+    try {
+      const after = await songloft.storage.get(STORAGE_KEY_CLEAN_SHUTDOWN);
+      if (after === true || after === 'true') return false;
+    } catch (e) {
+      return false;
+    }
+    return removed;
   }
 
   /** 写下清洁停机标记；onDeinit 调用，代表这次卸载是宿主主动的、可预期的。 */

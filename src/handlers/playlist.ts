@@ -2,16 +2,53 @@
 // 翻译自 Go 源码: plugins/songloft-plugin-xiaomi/handlers/playlist_handler.go
 
 import { jsonResponse, parseQuery } from '@songloft/plugin-sdk';
-import type { Router, HTTPRequest } from '@songloft/plugin-sdk';
+import type { Router, HTTPRequest, HTTPResponse } from '@songloft/plugin-sdk';
 import { PlaylistManagerMap, isTempPlaylistId, normalizePlayMode, resolvePlaylistResumeStart } from '../player/manager';
 import type { PlaylistManager } from '../player/manager';
 import { MinaService } from '../service/service';
 import { ConfigManager, playlistProgressScope } from '../config/manager';
 import { callHostAPI } from '../utils/http';
 import { getSwitchCoordinator } from '../playback_sync';
-import { resumePendingFirst } from '../voicecmd/resume_pending';
+import type { SwitchCoordinator } from '../playback_sync';
+import { resumePendingIfAvailable } from '../voicecmd/resume_pending';
 import { findFavoritesPlaylist } from '../utils/favorites';
 import type { PlayMode, PlayState } from '../types';
+
+/**
+ * 「继续播放」入口的第一步：有有效待播放上下文就消费它并返回响应，没有则返回 null。
+ *
+ * 网页 toggle、网页 resume、语音/AI resume 三条路都要遵守「优先消费待播放上下文，
+ * 没有才回退目标原活动上下文」。规则本体在 resume_pending.ts，这里只负责把它塑造成
+ * 网页响应，三处共用一份，避免各自分支时漏掉某一条规则。
+ */
+async function respondWithPendingIfAny(
+  coordinator: SwitchCoordinator | null,
+  accountId: string,
+  deviceId: string,
+  manager: PlaylistManager,
+  successData: Record<string, unknown>,
+): Promise<HTTPResponse | null> {
+  const decision = await resumePendingIfAvailable({
+    getCoordinator: () => coordinator,
+    accountId,
+    deviceId,
+    log: (m) => songloft.log.warn(m),
+  });
+  if (!decision.handled) return null;
+
+  if (decision.outcome === 'succeeded') {
+    updateDeviceStatusCache(accountId, deviceId, { state: 'playing', position: manager.getStatus().position });
+    return jsonResponse({
+      success: true,
+      data: {
+        ...successData,
+        outcome: 'succeeded',
+        current_song: manager.getCurrentSong(),
+      },
+    });
+  }
+  return jsonResponse({ success: false, outcome: decision.outcome, error: 'failed to resume pending context' });
+}
 
 /** 解析请求体（兼容 Uint8Array 和 string） */
 function parseBody(req: HTTPRequest): any {
@@ -460,24 +497,12 @@ export function registerPlaylistHandlers(
       } else if (songId > 0) {
         ok = await manager.playPlaylistFromSong(playlistId, songId, mode, startIndex);
       } else if (startPosition === 'resume') {
-        // 明确 resume：优先消费有效 pending；没有 pending 才使用目标原活动上下文。
-        const coordinator = getSwitchCoordinator();
-        if (coordinator) {
-          const decision = await resumePendingFirst({
-            tryResumePending: () => coordinator.tryResumePending(account_id, device_id),
-            log: (m) => songloft.log.warn(m),
-          });
-          if (decision.handled) {
-            if (decision.outcome === 'succeeded') {
-              updateDeviceStatusCache(account_id, device_id, { state: 'playing', position: manager.getStatus().position });
-              return jsonResponse({
-                success: true,
-                data: { message: 'pending context resumed', outcome: 'succeeded', current_song: manager.getCurrentSong() },
-              });
-            }
-            return jsonResponse({ success: false, outcome: decision.outcome, error: 'failed to resume pending context' });
-          }
-        }
+        // 明确 resume：优先消费有效待播放上下文；没有才使用目标原活动上下文。
+        const resumed = await respondWithPendingIfAny(
+          getSwitchCoordinator(), account_id, device_id, manager, { message: 'pending context resumed' },
+        );
+        if (resumed) return resumed;
+
         const resume = await resolvePlaylistResumeStart(configManager, manager.getPrimary(), playlistId);
         ok = resume && resume.songId > 0
           ? await manager.playPlaylistFromSong(playlistId, resume.songId, mode, resume.songIndex)
@@ -556,24 +581,11 @@ export function registerPlaylistHandlers(
         return jsonResponse({ success: true, data: { message: 'playlist paused', state: 'paused', outcome: 'succeeded' } });
       }
 
-      // 目标未播放：优先消费有效 pending；没有 pending 才使用目标原活动上下文。
-      const coordinator = getSwitchCoordinator();
-      if (coordinator) {
-        const decision = await resumePendingFirst({
-          tryResumePending: () => coordinator.tryResumePending(account_id, device_id),
-          log: (m) => songloft.log.warn(m),
-        });
-        if (decision.handled) {
-          if (decision.outcome === 'succeeded') {
-            updateDeviceStatusCache(account_id, device_id, { state: 'playing', position: manager.getStatus().position });
-            return jsonResponse({
-              success: true,
-              data: { message: 'pending context resumed', state: 'playing', outcome: 'succeeded', current_song: manager.getCurrentSong() },
-            });
-          }
-          return jsonResponse({ success: false, outcome: decision.outcome, error: 'failed to resume pending context' });
-        }
-      }
+      // 目标未播放：优先消费有效待播放上下文；没有才使用目标原活动上下文。
+      const resumed = await respondWithPendingIfAny(
+        getSwitchCoordinator(), account_id, device_id, manager, { message: 'pending context resumed', state: 'playing' },
+      );
+      if (resumed) return resumed;
 
       if (!manager.hasPlaylist()) {
         return jsonResponse({ success: false, error: 'no playlist loaded, please select a playlist first' });

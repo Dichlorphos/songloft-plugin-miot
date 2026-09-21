@@ -63,7 +63,7 @@ function fakeManagerMap(gracefulPlay: () => Promise<boolean>) {
 test('D4：gracefulPlay 抛错时 playPendingContext 返回 unknown（真实产生点）', async () => {
   const map = fakeManagerMap(async () => { throw new Error('ubus timeout'); });
 
-  const outcome = await playPendingContext(map, 'acc1', 'devB', 7, { id: 11 }, 2, 30, 'order', 1);
+  const outcome = await playPendingContext(map, 'acc1', 'devB', 7, { id: 11, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }, 2, 30, 'order', 1);
 
   assert.equal(outcome, 'unknown', '下发抛错必须归为 unknown，而不是 failed');
 });
@@ -71,7 +71,7 @@ test('D4：gracefulPlay 抛错时 playPendingContext 返回 unknown（真实产�
 test('D4：gracefulPlay 返回 false 时是 failed（设备明确拒绝，不是未知）', async () => {
   const map = fakeManagerMap(async () => false);
 
-  const outcome = await playPendingContext(map, 'acc1', 'devB', 7, { id: 11 }, 2, 30, 'order', 1);
+  const outcome = await playPendingContext(map, 'acc1', 'devB', 7, { id: 11, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }, 2, 30, 'order', 1);
 
   assert.equal(outcome, 'failed', '设备明确拒绝与结果未知必须区分开');
 });

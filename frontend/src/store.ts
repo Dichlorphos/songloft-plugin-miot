@@ -340,6 +340,7 @@ let selectionRevision = 0;
 export async function selectDevice(accountId: string, selectedDeviceId: string): Promise<void> {
   selectionRevision += 1;
   const revision = selectionRevision;
+  const fromAccountId = state.currentAccountId;
   state.currentAccountId = accountId;
   state.currentDeviceId = selectedDeviceId;
   state.player = {};
@@ -348,7 +349,11 @@ export async function selectDevice(accountId: string, selectedDeviceId: string):
   void refreshPlaylistProgress();
   connectStatusStream();
   try {
-    await post('/mina/last_selection', { account_id: accountId, device_id: selectedDeviceId });
+    await post('/mina/last_selection', {
+      account_id: accountId,
+      device_id: selectedDeviceId,
+      from_account_id: fromAccountId,
+    });
     if (revision === selectionRevision) await refreshPlayerStatus();
   } catch (error) {
     if (revision === selectionRevision) notify(messageOf(error), 'error');

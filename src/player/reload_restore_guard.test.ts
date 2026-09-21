@@ -283,6 +283,62 @@ test('清洁停机标记：正常停止才置位，读取后即清除，缺失�
   assert.equal(await config.consumeCleanShutdownFlag(), false, '清除后再次读取按异常终止处理');
 });
 
+test('清洁停机标记清除失败时必须按异常终止处理（否则陈旧标记会放行下次崩溃）', async () => {
+  // 标记是一次性的。若 delete 失败却仍按 raw 值放行，这个陈旧标记会留在存储里，
+  // 让「之后那次崩溃」的启动也读到它——正是防隔夜叫醒机制要挡住的情形。
+  const { storage } = installFakeHost();
+  const config = new ConfigManager();
+  await config.markCleanShutdown();
+
+  const songloftRef = (globalThis as unknown as { songloft: { storage: { delete(key: string): Promise<void> } } }).songloft;
+  const originalDelete = songloftRef.storage.delete;
+  songloftRef.storage.delete = async () => { throw new Error('storage delete failed'); };
+
+  try {
+    assert.equal(
+      await config.consumeCleanShutdownFlag(),
+      false,
+      '清除失败不能放行：保守方向是多一次不自动续播',
+    );
+  } finally {
+    songloftRef.storage.delete = originalDelete;
+  }
+
+  // 删除失败虽然改了写，但本次仍必须不放行——这正是原缺陷：delete 抛错后照样 return raw。
+  // 改写的作用只是让它不再是可信值（只判 true / 'true'），别留给下一次启动。
+  assert.notEqual(storage.get('clean_shutdown'), 'true', '陈旧标记必须被改写失效，不能留 true 在存储里');
+});
+
+test('清洁停机标记删除与改写都失败时，仍必须按异常终止处理', async () => {
+  const { storage } = installFakeHost();
+  const config = new ConfigManager();
+  await config.markCleanShutdown();
+
+  const songloftRef = (globalThis as unknown as {
+    songloft: { storage: { delete(k: string): Promise<void>; set(k: string, v: string): Promise<void> } };
+  }).songloft;
+  const originalDelete = songloftRef.storage.delete;
+  const originalSet = songloftRef.storage.set;
+  songloftRef.storage.delete = async () => { throw new Error('delete failed'); };
+  songloftRef.storage.set = async () => { throw new Error('set failed'); };
+
+  try {
+    assert.equal(
+      await config.consumeCleanShutdownFlag(),
+      false,
+      '确认不了清除就必须按异常终止处理',
+    );
+  } finally {
+    songloftRef.storage.delete = originalDelete;
+    songloftRef.storage.set = originalSet;
+  }
+
+  // 已知残余限制：删除与改写都失败时存储里会残留 true，下次启动读到它只能放行。
+  // 那种情况下存储整体不可写，无法让一次性标记失效；这里如实钉住当前行为，
+  // 免得将来误以为已被根治。
+  assert.equal(storage.get('clean_shutdown'), 'true', '存储整体不可写时确实无法让标记失效（已知限制）');
+});
+
 test('接线：onInit 读并清标记后注入 map，onDeinit 写标记', async () => {
   const read = (relative: string) => readFileSync(fileURLToPath(new URL(relative, import.meta.url)), 'utf8');
   const main = read('../main.ts');

@@ -6,7 +6,7 @@
 import test from 'node:test';
 import * as assert from 'node:assert/strict';
 
-import { resumePendingFirst } from './resume_pending.ts';
+import { resumePendingFirst, resumePendingIfAvailable } from './resume_pending.ts';
 
 test('pending 消费成功时 handled 且报告 succeeded', async () => {
   const result = await resumePendingFirst({ tryResumePending: async () => ({ outcome: 'succeeded' }) });
@@ -37,4 +37,66 @@ test('消费过程抛错按 failed 处理并记日志，不回退', async () => 
   assert.deepEqual(result, { handled: true, outcome: 'failed' });
   assert.equal(logs.length, 1);
   assert.match(logs[0], /storage down/);
+});
+// ===== 三入口共用入口（resumePendingIfAvailable）=====
+
+test('共享入口：没有协调器时交回调用方回退目标原上下文', async () => {
+  const result = await resumePendingIfAvailable({
+    getCoordinator: () => null,
+    accountId: 'acc1',
+    deviceId: 'dev1',
+  });
+  assert.deepEqual(result, { handled: false, outcome: 'none' });
+});
+
+test('共享入口：把账号与设备原样透传给协调器', async () => {
+  const seen: Array<[string, string]> = [];
+  const result = await resumePendingIfAvailable({
+    getCoordinator: () => ({
+      async tryResumePending(accountId, deviceId) {
+        seen.push([accountId, deviceId]);
+        return { outcome: 'succeeded' as const };
+      },
+    }),
+    accountId: 'acc1',
+    deviceId: 'devB',
+  });
+
+  assert.deepEqual(seen, [['acc1', 'devB']]);
+  assert.deepEqual(result, { handled: true, outcome: 'succeeded' });
+});
+
+test('共享入口：协调器抛错时仍按 failed 处理，不回退', async () => {
+  const logs: string[] = [];
+  const result = await resumePendingIfAvailable({
+    getCoordinator: () => ({
+      async tryResumePending() { throw new Error('storage down'); },
+    }),
+    accountId: 'acc1',
+    deviceId: 'devB',
+    log: (m) => logs.push(m),
+  });
+
+  assert.deepEqual(result, { handled: true, outcome: 'failed' });
+  assert.equal(logs.length, 1);
+});
+
+test('三个继续播放入口都必须走共享入口，不得各写一份分支', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+
+  const playlist = read('../handlers/playlist.ts');
+  const engine = read('./engine.ts');
+
+  for (const [name, source] of [['playlist.ts', playlist], ['engine.ts', engine]] as const) {
+    assert.match(source, /resumePendingIfAvailable/, `${name} 必须走共享入口`);
+    assert.doesNotMatch(source, /resumePendingFirst/, `${name} 不得再直接调用底层函数、各写一套分支`);
+  }
+  // 两处网页入口（toggle 与 start_position=resume）应共用同一个 helper
+  assert.equal(
+    (playlist.match(/respondWithPendingIfAny\(/g) ?? []).length,
+    3,
+    'playlist.ts 应有两处调用 + 一处定义',
+  );
 });

@@ -25,7 +25,7 @@ import type { MemoryRecord } from '../memory';
 import type { OnlineSearchResult } from './online_searcher';
 import type { ConversationMessage, VoiceCommand, PlayMode, AIAnalysisResult, SearchPriority } from '../types';
 import { getDefaultVoiceCommands } from './defaults';
-import { resumePendingFirst } from './resume_pending';
+import { resumePendingIfAvailable } from './resume_pending';
 export { getDefaultVoiceCommands } from './defaults';
 
 // ===== 类型定义 =====
@@ -1828,21 +1828,20 @@ export class VoiceEngine {
 
     // 明确「继续播放」优先消费有效 pending：切到新设备后目标 manager 通常是空的，
     // 若先判 hasPlaylist() 就会直接播报「没有正在播放的内容」，把待播放上下文整个绕过。
-    const coordinator = getSwitchCoordinator();
-    if (coordinator) {
-      const decision = await resumePendingFirst({
-        tryResumePending: () => coordinator.tryResumePending(accountId, deviceId),
-        log: (m) => songloft.log.warn(m),
-      });
-      if (decision.handled) {
-        if (decision.outcome === 'succeeded') {
-          songloft.log.info('[VoiceEngine] Pending context resumed');
-          return;
-        }
-        songloft.log.warn(`[VoiceEngine] Resume pending failed: outcome=${decision.outcome}`);
-        await this.minaService.textToSpeech(accountId, deviceId, '恢复播放失败');
+    const decision = await resumePendingIfAvailable({
+      getCoordinator: () => getSwitchCoordinator(),
+      accountId,
+      deviceId,
+      log: (m) => songloft.log.warn(m),
+    });
+    if (decision.handled) {
+      if (decision.outcome === 'succeeded') {
+        songloft.log.info('[VoiceEngine] Pending context resumed');
         return;
       }
+      songloft.log.warn(`[VoiceEngine] Resume pending failed: outcome=${decision.outcome}`);
+      await this.minaService.textToSpeech(accountId, deviceId, '恢复播放失败');
+      return;
     }
 
     const pm = this.playlistManagerMap.get(accountId, deviceId);

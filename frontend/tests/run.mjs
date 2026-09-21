@@ -80,6 +80,13 @@ assert.match(store, /selectCurrentPlaylistOnEntry/);
 assert.match(store, /await selectCurrentPlaylistOnEntry\(\)/);
 assert.match(store, /pendingConfigPatch/);
 assert.match(store, /while \(pendingConfigPatch\)/);
+// 跨账号切换必须把切换前的账号一并上报，服务端才能按源账号读取旧选择；
+// 断言同时钉住“先捕获旧值、再覆盖 currentAccountId”的顺序，删掉请求字段会立即变红。
+assert.match(
+  store,
+  /export async function selectDevice\([\s\S]*?const fromAccountId = state\.currentAccountId;\s*state\.currentAccountId = accountId;[\s\S]*?post\('\/mina\/last_selection', \{\s*account_id: accountId,\s*device_id: selectedDeviceId,\s*from_account_id: fromAccountId,/,
+  '设备切换请求必须携带切换前的 from_account_id',
+);
 assert.doesNotMatch(switchComponent, /flutter-cupertino-switch/);
 // SlButton 不得恢复 cupertino 分支：WebF flex-wrap 容器里 auto 宽度的
 // RenderWidget 基线被测成视口宽 → 按钮超出屏幕、每个独占一行

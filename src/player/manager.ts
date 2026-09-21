@@ -12,6 +12,7 @@ import type { PlayState, PlayMode, PlayerStatus, DeviceTargetRef, DeviceGroup } 
 import type { PlaybackRecorder } from '../playback_sync/recorder';
 import { buildObservation } from '../playback_sync/observation';
 import { decideLandingFailure, isEarlyLandingStop, LandingFailureCounter, LANDING_FAILURE_CIRCUIT_BREAK } from './landing_failure';
+import { planReloadRestore, decideReloadTakeover, clampStopPosition } from './reload_restore_decision';
 
 /** 分配临时歌单唯一负数 ID（每个设备/歌手各一个，互不冲突） */
 let nextTempPlaylistId = -1;
@@ -2528,35 +2529,36 @@ export class PlaylistManager {
     seekOffsetSec: number;
   }, opts?: { allowTakeover?: boolean }): Promise<void> {
     const song = this.getCurrentSong();
-    if (!song || song.id !== anchor.songId) {
-      return;
-    }
-    if (!Number.isFinite(anchor.positionSec) || anchor.positionSec < 0) {
-      return;
-    }
+    if (!song) return;
 
-    // 旧数据可能缺 atMs / seekOffsetSec（restoreFromConfig 会补 0）：
-    // - atMs<=0 不能拿去外推，否则会算出从 Unix 纪元到现在的天文数字位置；
-    //   这种锚点按「刚写下」处理，最终仍由判据 1 决定是否接管。
-    // - seekOffsetSec 缺失时退化为 0，流长判据会因此更保守。
-    const anchorAtMs = Number.isFinite(anchor.atMs) && anchor.atMs > 0 ? anchor.atMs : Date.now();
-    const anchorSeekOffset = Number.isFinite(anchor.seekOffsetSec) && anchor.seekOffsetSec > 0 ? anchor.seekOffsetSec : 0;
+    // 第一步：只看锚点，决定还原动作 / 是否需要查设备 / 是否直接钉死。
+    // 每条规则都在 reload_restore_decision.ts 里可直接喂输入验证。
+    const plan = planReloadRestore({
+      anchorState: anchor.state,
+      anchorPositionSec: anchor.positionSec,
+      anchorAtMs: anchor.atMs,
+      anchorSeekOffsetSec: anchor.seekOffsetSec,
+      matchesCurrentSong: song.id === anchor.songId,
+      allowTakeover: opts?.allowTakeover !== false,
+      now: Date.now(),
+      speed: this.playbackSpeed,
+    });
 
-    this.streamSeekOffsetSec = anchorSeekOffset;
+    if (plan.action === 'ignore') return;
 
-    // ===== 无副作用分支：只还原本地状态，不碰设备 =====
-    if (anchor.state === 'paused') {
+    if (plan.action === 'restore-paused') {
       // 暂停态不碰设备，只把状态摆回去，让网页进度条和「继续播放」按钮行为正确。
       // 刻意不持久化 hardStopped：重启后它归零，若当时其实是「暂停被设备升级成 stop」，
       // 续播会先走裸 play 这条路。那条路有 verifyResumeOrRepush 兜底（约 2.4 秒后带 seek
       // 重推 URL），代价是慢一点而不是续不上，不值得为它多加一个持久化字段。
       this.state = 'paused';
-      this.pausedPositionSec = anchor.positionSec;
+      this.pausedPositionSec = plan.positionSec;
       this.playStartTimeMs = 0;
-      songloft.log.info(`[PlaylistManager] Restored paused state after reload position=${anchor.positionSec.toFixed(1)}s song=${song.title}`);
+      songloft.log.info(`[PlaylistManager] Restored paused state after reload position=${plan.positionSec.toFixed(1)}s song=${song.title}`);
       return;
     }
-    if (anchor.state === 'stopped') {
+
+    if (plan.action === 'restore-stopped') {
       // 停止位置要活过重启：只摆状态，用户明确继续时由 replayCurrentFromStop 消费
       // lastStopPositionSec（它会带 seek 重推，不是从头播）。
       //
@@ -2564,29 +2566,22 @@ export class PlaylistManager {
       // 而这里刚重启、还什么都没发生。武装它等于每次启动都白白查设备最多 10 分钟，
       // 且与改动前的行为一致（此前 stopped 压根不落盘，重启后停在 idle、同样没有轮询）。
       this.state = 'stopped';
-      this.lastStopPositionSec = anchor.positionSec;
+      this.lastStopPositionSec = plan.positionSec;
       this.playStartTimeMs = 0;
       this.pausedPositionSec = 0;
-      songloft.log.info(`[PlaylistManager] Restored stopped state after reload position=${anchor.positionSec.toFixed(1)}s song=${song.title}`);
-      return;
-    }
-    if (anchor.state !== 'playing') {
+      songloft.log.info(`[PlaylistManager] Restored stopped state after reload position=${plan.positionSec.toFixed(1)}s song=${song.title}`);
       return;
     }
 
-    // ===== playing 分支：必须拿到「设备真的在放我们这条流」的硬证据才接管 =====
-    // 锚点时刻到现在的墙钟时间按倍速换算成曲内秒，用于没接管时的停止位置。
-    const ageMs = Math.max(0, Date.now() - anchorAtMs);
-    const estimated = anchor.positionSec + (ageMs / 1000) * this.playbackSpeed;
-
-    // 判据 3：上次不是正常卸载 → 一律不接管，也不去打扰设备。
-    if (opts?.allowTakeover === false) {
-      await this.pinStoppedAfterReload(song.title, estimated, 'last shutdown was not clean');
+    if (plan.action === 'pin-stopped') {
+      await this.pinStoppedAfterReload(song.title, plan.positionSec, plan.reason);
       return;
     }
 
-    // 判据 1：只有确证设备在放我们的流才接管。先按「不外推」的锚点位置摆好本地基准，
-    // 但此刻还不置 playing —— 查设备期间其它入口可能介入，钉死前要再复核一次。
+    // ===== 需要查设备：必须拿到「设备真的在放我们这条流」的硬证据才接管 =====
+    const { estimatedPositionSec, anchorSeekOffsetSec } = plan;
+    this.streamSeekOffsetSec = anchorSeekOffsetSec;
+
     let deviceState: { status: number; position: number; duration: number } | null = null;
     try {
       deviceState = await this.minaService.getPlayState(this.accountId, this.deviceId);
@@ -2600,37 +2595,36 @@ export class PlaylistManager {
       return;
     }
 
-    if (!deviceState || deviceState.status < 0) {
-      await this.pinStoppedAfterReload(song.title, estimated, 'device state unavailable');
+    // 第二步：硬条件判定。只有「设备在播」且「流长与我们对得上」才接管。
+    const decision = decideReloadTakeover({
+      deviceState,
+      // 'unknown' 不算：信息不足时保守钉死。
+      streamMatch: deviceState
+        ? this.matchDeviceStream(deviceState, { seekSeconds: anchorSeekOffsetSec, speed: this.playbackSpeed })
+        : 'unknown',
+      estimatedPositionSec,
+      anchorSeekOffsetSec,
+      speed: this.playbackSpeed,
+    });
+
+    if (decision.action === 'pin-stopped') {
+      await this.pinStoppedAfterReload(song.title, decision.positionSec, decision.reason);
       return;
     }
 
-    // 设备在放、且流长与「我们推的那条流」对得上（'unknown' 不算，信息不足时保守钉死）。
-    if (deviceState.status === 1 && this.matchDeviceStream(deviceState, { seekSeconds: anchorSeekOffset, speed: this.playbackSpeed }) === 'ours') {
-      // 设备实测位置优先（它才知道缓冲耗了多久）；没上报就用外推值
-      const devicePosition = deviceState.position > 0
-        ? deviceState.position * this.playbackSpeed + anchorSeekOffset
-        : estimated;
-      this.state = 'playing';
-      this.hardStopped = false;
-      this.pausedPositionSec = 0;
-      this.playStartTimeMs = Date.now() - (devicePosition / this.playbackSpeed) * 1000;
-      if (song.duration > 0) {
-        songloft.log.info(`[PlaylistManager] Resume after reload: our stream still playing, timer taken over at ${devicePosition.toFixed(1)}s song=${song.title}`);
-        this.resetAutoNextTimer(devicePosition);
-      } else {
-        // duration==0：重载后无法按曲长注册定时器，改启动设备流长探测兜底（#437）。
-        songloft.log.info(`[PlaylistManager] Resume after reload: duration unknown, starting device duration probe at ${devicePosition.toFixed(1)}s song=${song.title}`);
-        this.scheduleDurationProbe();
-      }
-      return;
+    const devicePosition = decision.devicePositionSec;
+    this.state = 'playing';
+    this.hardStopped = false;
+    this.pausedPositionSec = 0;
+    this.playStartTimeMs = Date.now() - (devicePosition / this.playbackSpeed) * 1000;
+    if (song.duration > 0) {
+      songloft.log.info(`[PlaylistManager] Resume after reload: our stream still playing, timer taken over at ${devicePosition.toFixed(1)}s song=${song.title}`);
+      this.resetAutoNextTimer(devicePosition);
+    } else {
+      // duration==0：重载后无法按曲长注册定时器，改启动设备流长探测兜底（#437）。
+      songloft.log.info(`[PlaylistManager] Resume after reload: duration unknown, starting device duration probe at ${devicePosition.toFixed(1)}s song=${song.title}`);
+      this.scheduleDurationProbe();
     }
-
-    await this.pinStoppedAfterReload(
-      song.title,
-      estimated,
-      `device not verifiably playing our stream (status=${deviceState.status} deviceDuration=${deviceState.duration}s)`,
-    );
   }
 
   /**
@@ -2647,7 +2641,7 @@ export class PlaylistManager {
     this.playStartTimeMs = 0;
     this.pausedPositionSec = 0;
     const duration = this.getCurrentSong()?.duration ?? 0;
-    this.lastStopPositionSec = Math.max(0, duration > 0 ? Math.min(positionSec, duration) : positionSec);
+    this.lastStopPositionSec = clampStopPosition(positionSec, duration);
     songloft.log.info(`[PlaylistManager] Resume after reload: pinned stopped at ${this.lastStopPositionSec.toFixed(1)}s (${reason}) song=${songTitle}`);
     await this.persistState();
   }

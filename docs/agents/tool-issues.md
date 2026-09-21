@@ -173,3 +173,36 @@
 - 相关链接：`docs/agents/tool-issues.md` 的构建污染条目（同源 CRLF 问题）、`.scratch/playback-sync/` 下本次改动
 - 复现记录：
   - 2026-09-21：本任务中 `.Replace` 静默 no-op 1 次，here-string 反引号误转义 3 次。
+
+### 2026-09-21 — Node.js / npm — 本地 node_modules 与 static 构建产物缺失导致测试及类型检查失败
+
+- 状态：resolved
+- 工具及版本：Node.js v26.9.0；npm 11.19.1
+- 环境：Windows 11 + PowerShell 7；干净检出（仓库不包含 `node_modules/`，`static/` 也尚未生成）
+- 现象：干净检出后直接执行测试与类型检查时，三类命令同时失败；前端契约测试还因找不到构建产物而在启动阶段退出。
+- 原始错误：
+  - `npm test`：7 个测试文件均报 `Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@songloft/plugin-sdk'`
+  - `npm run typecheck`：`'tsc' is not recognized as an internal or external command`
+  - `node frontend/tests/run.mjs`：`ENOENT: no such file or directory, open '...\static\js\app.js'`
+- 根因：仓库不提交 `node_modules/`，因此本地没有 SDK、TypeScript 等依赖；`static/` 是 Vite 构建产物且已被 `.gitignore` 忽略，必须先安装依赖、构建前端产物，前端契约测试才有 `static/js/app.js` 可读。
+- 解决方案或规避方案：先在仓库根目录执行 `npm ci`；再解决下一条 npm 11 的 `allow-scripts` 环境配置冲突；随后执行 `node scripts/songloft-plugin.cjs build` 生成 `static/`。依赖和前端构建产物就绪后，三个命令均可通过。
+- 验证：`npm test` 181 项全部通过；`npm run typecheck` 通过；`node frontend/tests/run.mjs` 通过。
+- 相关链接：`.gitignore`、`package.json`、`frontend/tests/run.mjs`、本文件 2026-09-21 的 npm 11 `allow-scripts` 条目
+- 复现记录：
+  - 2026-09-21：干净检出后直接运行上述三个命令必现；执行 `npm ci` 并按下一条解决 npm 11 环境冲突、再构建前端产物后，`npm test` 181 项、`npm run typecheck` 与 `node frontend/tests/run.mjs` 全部通过。
+
+### 2026-09-21 — npm 11 — frontend 安装阶段被用户级 allow-scripts 配置映射为参数而拒绝
+
+- 状态：workaround
+- 工具及版本：npm 11.19.1；`@songloft/plugin-builder`（`^2.13.7`，本地 `node_modules/@songloft/plugin-builder/dist/cli.js`）；Node.js v26.9.0
+- 环境：Windows 11 + PowerShell 7；用户级 `~/.npmrc` 含 `allow-scripts = ["@xai-official/grok"]`；失败发生在 `frontend/` 目录（`cwd D:\songloft-plugin-miot\frontend`）
+- 现象：执行 `npm run build`，构建脚本打印 `📦 Installing frontend dependencies...` 后立即失败，无法继续构建前端。
+- 原始错误：
+  - `npm error code EALLOWSCRIPTS`
+  - `npm error --allow-scripts is not allowed in project-scoped installs. Add the entries to the "allowScripts" field in package.json, or to .npmrc, instead.`
+- 根因（已定位）：报错中的 `--allow-scripts` 不是本仓库脚本传入的，而是 npm 11.19.1 把用户级 `~/.npmrc` 中的 `allow-scripts = ["@xai-official/grok"]` 配置项映射成 `--allow-scripts` 参数，传给由 `@songloft/plugin-builder` 发起的子进程 `npm install`（其实现为 `execFileSync(NPM, ["install"], { cwd: frontendDir })`）；npm 11 拒绝在 project-scoped install 中使用该参数。这是环境侧配置冲突，不是仓库代码缺陷：若本机 `~/.npmrc` 没配 `allow-scripts` 就不会出现，根因已定位而非猜测。
+- 解决方案或规避方案：在 `frontend/` 目录先使用一份空的 `--userconfig` 执行一次安装，例如 `npm install --userconfig <空文件> --no-audit --no-fund`；之后执行 `node scripts/songloft-plugin.cjs build` 即可正常通过。未解决的部分：`@songloft/plugin-builder` 没有把 `frontend/` 声明为 workspace，所以 npm 的 project-scoped 校验无法从仓库侧回避；若升级 npm 或修改用户级 `.npmrc`，需另行验证。
+- 验证：使用空的 `--userconfig` 安装 frontend 依赖后，`node scripts/songloft-plugin.cjs build` 正常通过，构建产物 entryHash `fa8840e9…` 与改动前一致。
+- 相关链接：`node_modules/@songloft/plugin-builder/dist/cli.js`、`frontend/package.json`、`package.json`、用户级 `~/.npmrc`
+- 复现记录：
+  - 2026-09-21：在本机 `~/.npmrc` 含 `allow-scripts = ["@xai-official/grok"]` 时执行 `npm run build`，在 `frontend/` 的依赖安装阶段必现 `EALLOWSCRIPTS`；改用空 `--userconfig` 完成安装后构建通过。
