@@ -8,6 +8,26 @@ Status: implemented
 
 需求已实现并通过自动化验证：播放快照、待播放上下文、快照记录出口与切换同步均已落地，测试入口见本文「验收」。真机验收与发布门禁见 [issues/03-manual-acceptance.md](issues/03-manual-acceptance.md)；此前该文档中的「需求整理阶段、尚无实现」描述已失效。
 
+### 仓库与发版基线
+
+本工作仓库是 [songloft-org/songloft-plugin-miot](https://github.com/songloft-org/songloft-plugin-miot) 的 fork：
+
+- `origin` = `Dichlorphos/songloft-plugin-miot`（本仓库，播放同步功能所在线）
+- `upstream` = `songloft-org/songloft-plugin-miot`（官方上游）
+
+两条线在 `c0cd929`（`v2026.9.11`）分叉后各自独立演进，从未互相合并（截至 2026-09-21：fork 线多 85 个提交，upstream 线多 24 个提交）。`src/playback_sync/` 与票据 01-05 只存在于 fork 线，upstream 线没有这套功能。
+
+由此推出三条事实，用于避免误判：
+
+- upstream 的 `v2026.9.21`（`cb2d28f`）是官方发版，属于 upstream 线，与播放同步无关；它不是本仓库的发版记录，也不代表播放同步已发布。
+- 本仓库（fork）从未发布过带播放同步的版本：fork 没有任何 tag，`plugin.json` 版本仍是 `2026.9.11`。
+- [票据 03](issues/03-manual-acceptance.md) 的发布门禁是预先约定，不是已触发的发布违规；它约束的是将来在 fork 线上发布带播放同步的版本。
+
+尚未处理（与播放同步实现无关的仓库卫生问题）：
+
+- fork 的 `plugin.json` / `package.json` 版本号停在 `2026.9.11`，未随 fork 线提交推进。
+- fork 的 `plugin.json` 中 `updateUrl` 指向 upstream 的 `main`，会把版本检查引到另一条线。
+
 ## 目标
 
 切换到未加入设备组的独立目标设备时，异步保存账号级最新播放快照为该设备的待播放上下文。复用现有播放、继续和设备选择入口及现有播放管理器；设备组继续使用共享 `PlaylistManager`。不新增最近播放入口或切换 API。

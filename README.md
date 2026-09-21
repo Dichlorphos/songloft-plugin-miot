@@ -60,6 +60,17 @@ node frontend/tests/run.mjs   # frontend contract tests
 - 每次发版会自动滚动到最新数据;长期未更新的插件版本可能缺失最新节假日,建议定期升级插件。
 - 数据下载产物已 commit 入库,本地无网络也可构建。
 
+## 仓库与上游
+
+本仓库是 [songloft-org/songloft-plugin-miot](https://github.com/songloft-org/songloft-plugin-miot) 的 fork，用于开发播放同步等本地功能：
+
+- `origin` = `Dichlorphos/songloft-plugin-miot`（本仓库）
+- `upstream` = `songloft-org/songloft-plugin-miot`（官方上游）
+
+两条线在 `v2026.9.11`（`c0cd929`）分叉后各自独立演进。播放同步相关代码（`src/playback_sync/`）只存在于本仓库，上游没有。**上游的 release / tag（如 `v2026.9.21`）属于官方发版线，不是本仓库的发版记录。**
+
+本仓库尚未发布过带播放同步的版本：仓库没有任何 tag，`plugin.json` 版本仍为 `2026.9.11`，且其 `updateUrl` 仍指向上游。将来在本仓库发版前需要先处理这两项。
+
 ## 发版节奏
 
 发版为**手动触发**,没有定时任务:仓库不自动发版,只有维护者在 Actions 页手动运行 `Release Plugin` 时才会构建并发布。

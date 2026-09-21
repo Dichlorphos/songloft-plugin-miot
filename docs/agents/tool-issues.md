@@ -247,3 +247,25 @@
 - 相关链接：`docs/agents/tool-issues.md` 的 PowerShell here-string 条目（同属 PowerShell 文本处理坑）、`.scratch/playback-sync/spec.md`、`docs/adr/0003-landing-confirmation-gates-pending-clearance.md`
 - 复现记录：
   - 2026-09-21：对 `docs/adr/0003-...md` 与 `.scratch/playback-sync/issues/03-manual-acceptance.md` 批量补丁时命中；ADR 的“整整行为”错别字也因该缺陷未被定位。
+
+### 2026-09-21 — exec_command / PowerShell — 嵌套 powershell -Command 吞掉 $ 变量
+
+- 状态：workaround
+- 工具及版本：`exec_command`（Windows）+ PowerShell 7.6.6（pwsh）；外层已是 pwsh 7，又调裸 `powershell`（= Windows PowerShell 5.1）嵌套执行
+- 环境：Windows 11 + 本项目仓库；命令内含 `$p`、`$l`、`$i`、`$_` 等变量
+- 现象：为了绕开“shell 参数偶发落到 bash”，改用 `powershell -NoProfile -Command "..."` 包一层，结果内层命令的 `$` 变量全部被剥掉，脚本变成语法垃圾或空输出。
+- 原始错误：
+  - `='.scratch\playback-sync\spec.md'; =Get-Content -LiteralPath ; for(=0; -lt 16;++){ ... }`（`$p`/`$l`/`$i` 全被吞）
+  - `'$script' is not recognized as an internal or external command`（外层 bash 收到文本）
+- 根因（两层，互相叠加）：
+  1. **变量展开**：外层 pwsh 先把双引号内的 `$var` 展开成空串，再拼成内层命令，于是 `$p`/`$l`/`$i` 全没了。
+  2. **裸 `powershell` 是 5.1，不是 7**：本机 `powershell.exe` = Windows PowerShell 5.1.26100.9444（Desktop），`pwsh.exe` = 7.6.6（Core）。5.1 默认按 ANSI/GBK 读取无 BOM 的 UTF-8 文件，中文直接乱码（实测 `Get-Content` 读 UTF-8 无 BOM 文件输出「娴嬭瘯涓枃」），中文锚点必然匹配失败。
+- 解决方案或规避方案：
+  1. 不要嵌套 `powershell -Command`。保持单一 PowerShell 会话，`exec_command` 显式 `shell: 'powershell'`。
+  2. 必须嵌套时：Windows 上用 `pwsh`（Core 7）而非裸 `powershell`（可能是 5.1）；用单引号包裹 `-Command` 参数；或把脚本落成 `.ps1` 再 `-File` 执行。
+  3. 改文件仍优先“带断言的 Node/CJS 脚本 → `node file.cjs`”，完全不经过 PowerShell 变量展开。
+  4. 读取 UTF-8 中文文件一律用 `[System.IO.File]::ReadAllText(path, [System.Text.UTF8Encoding]::new($false))`；同样写入用 `[System.IO.File]::WriteAllText` + 同款 UTF8Encoding，避免 5.1 的 ANSI 默认与 BOM 差异。
+- 验证：把脚本改为 `@'...'@` 写临时 `.cjs` 再 `node` 执行后，两次文档补丁一次成功（spec.md + README.md），`npm test` 250 项、`npm run typecheck` 全绿。
+- 相关链接：本文件 PowerShell here-string 条目、`exec_command` 沙箱条目（同属 PowerShell 文本处理坑）
+- 复现记录：
+  - 2026-09-21：本轮文档补丁任务中，嵌套 `powershell -Command` 连续失败 4 次；改用临时 `.cjs` 后成功。
