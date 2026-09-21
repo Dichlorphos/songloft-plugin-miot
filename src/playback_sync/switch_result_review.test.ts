@@ -300,6 +300,75 @@ test('被作废的消费不得在原下发之前继续（代际复查）', async
   assert.equal(result.outcome, 'none', '如实报告「没有可消费的上下文」，让调用方走新内容的正常路径');
 });
 
+test('消费队列在异常后仍可用（一次失败不得卡死后续继续）', async () => {
+  // 队列本身必须永不 reject：否则一次消费抛错会把该目标后续所有继续操作永久堵死。
+  const pendingStore = new PendingContextStore(memoryStorage());
+  await pendingStore.write({
+    account_id: 'acc1', target_device_id: 'devB', source_revision: 1, snapshot: snapshot(), now: 1_000,
+  });
+
+  let attempts = 0;
+  const coordinator = new SwitchCoordinator({
+    snapshotStore: new PlaybackSnapshotStore(memoryStorage()),
+    pendingStore,
+    now: () => 1_000,
+    getCurrentDevice: async () => 'devA',
+    setCurrentDevice: async () => {},
+    isGroupDevice: async () => false,
+    sampleOnSwitch: async () => ({ ok: false, reason: 'no_snapshot' as const }),
+    loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
+    playPlaylist: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('ubus exploded');
+      return 'succeeded';
+    },
+  });
+
+  const first = await coordinator.tryResumePending('acc1', 'devB');
+  assert.equal(first.outcome, 'failed', '第一次抛出按 failed 上报');
+  // pending 仍在（失败不得清除），因此第二次应当还能继续消费
+  const second = await coordinator.tryResumePending('acc1', 'devB');
+  assert.equal(second.outcome, 'succeeded', '队列必须恢复，第二次继续要能正常消费');
+  assert.equal(attempts, 2);
+});
+
+test('不同目标设备的继续操作互不阻塞', async () => {
+  // 互斥只应按「账号 + 目标设备」生效，不能变成全局串行。
+  const pendingStore = new PendingContextStore(memoryStorage());
+  await pendingStore.write({
+    account_id: 'acc1', target_device_id: 'devB', source_revision: 1, snapshot: snapshot(), now: 1_000,
+  });
+  await pendingStore.write({
+    account_id: 'acc1', target_device_id: 'devC', source_revision: 1, snapshot: snapshot(), now: 1_000,
+  });
+
+  const started: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const coordinator = new SwitchCoordinator({
+    snapshotStore: new PlaybackSnapshotStore(memoryStorage()),
+    pendingStore,
+    now: () => 1_000,
+    getCurrentDevice: async () => 'devA',
+    setCurrentDevice: async () => {},
+    isGroupDevice: async () => false,
+    sampleOnSwitch: async () => ({ ok: false, reason: 'no_snapshot' as const }),
+    loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
+    playPlaylist: async (_a, deviceId) => { started.push(deviceId); await gate; return 'succeeded'; },
+  });
+
+  const b = coordinator.tryResumePending('acc1', 'devB');
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  const c = coordinator.tryResumePending('acc1', 'devC');
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  const bothStarted = started.length;
+
+  release();
+  await Promise.all([b, c]);
+
+  assert.equal(bothStarted, 2, '两个不同目标都必须立刻开始，不能被对方的消费挡住');
+});
+
 test('确实没有 pending 时仍返回 none，保持既有回退行为', async () => {
   const coordinator = new SwitchCoordinator({
     snapshotStore: new PlaybackSnapshotStore(memoryStorage()),

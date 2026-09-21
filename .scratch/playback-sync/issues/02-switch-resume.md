@@ -66,3 +66,8 @@ Blocked by: 01
   - **消费期间被作废仍会按旧上下文下发**：`clearPending` 只删存储里的 pending、递增代际，但已经读过 pending、正在加载歌曲的那一路手里仍握着旧快照。原先只有「写 pending」侧复查代际，「消费 pending」侧没有。现于下发前复查代际，被作废时返回 `none` 而不是把旧上下文推下去。
   - **`suppressNewContentHook` 是 manager 级布尔量，会误抑制并发请求**：`gracefulPlay` 在途期间打开该标志，任何**其它**并发请求（用户在别处点了新歌单、语音点了新歌）的 `clearPending` 都被一起抑制——新内容已经开始播，旧 pending 却还留在存储里，之后一次「继续播放」会把旧上下文又推出来。现改为逐次调用显式传参（`playWithSongs(..., { consumingPending: true })`），不再有这个共享状态。
   - 验证：`npm test` 234 项通过、`npm run typecheck`。新增 `src/player/new_content_suppression.test.ts`（4 项）；全部 5 条关键改动做过变异验证，回滚实现后对应测试确实变红（其中两条首版测试是假绿，已改成走真正会触发抑制的电台分支）。
+
+- 2026-09-21（第三轮补充）：互斥队列的健壮性也补了回归——
+  - 一次消费抛错后队列必须恢复（不能被永久 reject 卡死该目标后续所有继续操作）；
+  - 互斥只按「账号 + 目标设备」生效，不能退化成全局串行（不同目标必须能同时开始）。
+  - 验证：`npm test` 236 项通过、`npm run typecheck`、`node frontend/tests/run.mjs`、`npm run build`（entryHash `ddc6c7df…`）。
