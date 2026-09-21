@@ -42,7 +42,7 @@ function fakeManager(overrides: Record<string, unknown> = {}) {
   return manager;
 }
 
-function buildRouter(manager: any) {
+function buildRouter(manager: any, configOverrides: Record<string, unknown> = {}) {
   const router = createRouter();
   const map = { get: () => manager, getOrCreate: async () => manager };
   const mina = {
@@ -51,7 +51,7 @@ function buildRouter(manager: any) {
     async textToSpeech() {},
   };
   const config = {
-    async getConfig() { return { server_host: 'http://192.168.1.10:58091' }; },
+    async getConfig() { return { server_host: 'http://192.168.1.10:58091', ...configOverrides }; },
     async getDevices() { return []; },
     async getPlaylistProgress() { return null; },
   };
@@ -93,4 +93,69 @@ test('/player/toggle：paused 态恢复走 resumePlayback，不受停止位置�
 
   assert.equal(body.success, true);
   assert.deepEqual(manager.calls, ['resumePlayback'], 'paused 必须走原位续播，不重推 URL');
+});
+
+// ===== 失败分支：不得把没播上的报成成功 =====
+//
+// toggle 的最后一段是「重新下发」的兜底路径。它有三个出口，任何一个返回失败都必须
+// 如实上报 success:false；否则前端会显示成已恢复播放，而音箱并没有出声。
+
+test('/player/toggle：stopped 态 replayCurrentFromStop 失败必须报失败', async () => {
+  const manager = fakeManager({
+    replayCurrentFromStop: async () => { return false; },
+  });
+  const router = buildRouter(manager);
+
+  const body = await call(router, '/player/toggle', { account_id: 'acc1', device_id: 'devB' });
+
+  assert.equal(body.success, false, '恢复失败不得报成功');
+  assert.match(body.error, /resume playback/);
+});
+
+test('/player/toggle：普通歌单重新下发失败必须报失败', async () => {
+  // 非 stopped、非临时歌单的兜底分支：paused 下 resumePlayback 失败会走到这里。
+  const manager = fakeManager({
+    getStatus: () => ({ state: 'paused', playlist_id: 7, current_index: 2, play_mode: 'order', position: 30 }),
+    resumePlayback: async () => false,
+    play: async () => false,
+  });
+  const router = buildRouter(manager);
+
+  const body = await call(router, '/player/toggle', { account_id: 'acc1', device_id: 'devB' });
+
+  assert.equal(body.success, false, 'play() 返回 false 时必须报失败，而不是谎报 succeeded');
+});
+
+test('/player/toggle：临时歌单重新下发失败必须报失败', async () => {
+  const manager = fakeManager({
+    getStatus: () => ({ state: 'idle', playlist_id: -1, current_index: 0, play_mode: 'order', position: 0 }),
+    playWithSongs: async () => false,
+  });
+  const router = buildRouter(manager);
+
+  const body = await call(router, '/player/toggle', { account_id: 'acc1', device_id: 'devB' });
+
+  assert.equal(body.success, false, '临时歌单重放失败不得报成功');
+});
+
+test('/player/toggle：未配置服务器地址时直接报错，不下发', async () => {
+  const manager = fakeManager();
+  const router = buildRouter(manager, { server_host: '' });
+
+  const body = await call(router, '/player/toggle', { account_id: 'acc1', device_id: 'devB' });
+
+  assert.equal(body.success, false);
+  assert.match(body.error, /服务器地址/);
+  assert.deepEqual(manager.calls, [], '配置不全时不得向设备下发任何东西');
+});
+
+test('/player/toggle：服务器地址是回环时直接报错，不下发', async () => {
+  const manager = fakeManager();
+  const router = buildRouter(manager, { server_host: 'http://127.0.0.1:58091' });
+
+  const body = await call(router, '/player/toggle', { account_id: 'acc1', device_id: 'devB' });
+
+  assert.equal(body.success, false);
+  assert.match(body.error, /回环地址/);
+  assert.deepEqual(manager.calls, [], '音箱访问不到回环地址，不得下发');
 });
