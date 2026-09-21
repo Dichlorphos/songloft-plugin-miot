@@ -69,7 +69,9 @@ node frontend/tests/run.mjs   # frontend contract tests
 
 两条线在 `v2026.9.11`（`c0cd929`）分叉后各自独立演进。播放同步相关代码（`src/playback_sync/`）只存在于本仓库，上游没有。**上游的 release / tag（如 `v2026.9.21`）属于官方发版线，不是本仓库的发版记录。**
 
-本仓库尚未发布过带播放同步的版本：仓库没有任何 tag，`plugin.json` 版本仍为 `2026.9.11`，且其 `updateUrl` 仍指向上游。将来在本仓库发版前需要先处理这两项。
+本仓库**自行发布 release**：`plugin.json` 的 `updateUrl` 与 `download_url` 都指向本仓库，用户从本仓库获取更新（两者必须同源，只改其一会让客户端检查更新后下载到另一条线的构建）。
+
+版本号与 `download_url` 由 `Release Plugin` 工作流在发版时写入，日常提交不手动推进版本号。功能合并回上游后使用上游自己的发版配置即可，本仓库的地址配置随合并被替换。
 
 ## 发版节奏
 

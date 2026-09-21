@@ -23,10 +23,11 @@ Status: implemented
 - 本仓库（fork）从未发布过带播放同步的版本：fork 没有任何 tag，`plugin.json` 版本仍是 `2026.9.11`。
 - [票据 03](issues/03-manual-acceptance.md) 的发布门禁是预先约定，不是已触发的发布违规；它约束的是将来在 fork 线上发布带播放同步的版本。
 
-尚未处理（与播放同步实现无关的仓库卫生问题）：
+发版策略（2026-09-21 确认）：
 
-- fork 的 `plugin.json` / `package.json` 版本号停在 `2026.9.11`，未随 fork 线提交推进。
-- fork 的 `plugin.json` 中 `updateUrl` 指向 upstream 的 `main`，会把版本检查引到另一条线。
+- 本仓库自行发布 release。`plugin.json` 的 `updateUrl` 与 `download_url` 均指向本仓库，用户从本仓库获取更新；两者必须同源，只改其一会让客户端检查后下载到另一条线的构建。
+- `plugin.json` / `package.json` 的版本号与 `download_url` 由发版工作流在发版时统一写入（`download_url` 用 `${GITHUB_REPOSITORY}` 自动适配所在仓库），日常提交不手动推进版本号。
+- 功能合并回 upstream 时使用 upstream 自己的发版配置；本仓库的地址配置随合并被替换，不需要额外还原流程。
 
 ## 目标
 
