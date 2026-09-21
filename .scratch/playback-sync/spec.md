@@ -15,19 +15,14 @@ Status: implemented
 - `origin` = `Dichlorphos/songloft-plugin-miot`（本仓库，播放同步功能所在线）
 - `upstream` = `songloft-org/songloft-plugin-miot`（官方上游）
 
-两条线在 `c0cd929`（`v2026.9.11`）分叉后各自独立演进，从未互相合并（截至 2026-09-21：fork 线多 85 个提交，upstream 线多 24 个提交）。`src/playback_sync/` 与票据 01-05 只存在于 fork 线，upstream 线没有这套功能。
+两条线在 `c0cd929`（`v2026.9.11`）分叉后各自独立演进。2026-09-21 已将上游 24 个提交合并回 fork 的 `main`（合并提交 `a8f0845`，双亲 `1e3d5e7` 与 `73c925b`）；`src/playback_sync/` 与票据 01-05 仍只存在于本仓库。合并时按「保留本地播放同步实现 + 吸收上游同源修复」处理，其中上游 #466 的起播失败跳歌被并入本地起播确认回调机制（`landing_failure.ts` 的纯函数判定 + `scheduleLandingVerify`）。
 
-由此推出三条事实，用于避免误判：
+发版策略（2026-09-21 合并后更新）：
 
-- upstream 的 `v2026.9.21`（`cb2d28f`）是官方发版，属于 upstream 线，与播放同步无关；它不是本仓库的发版记录，也不代表播放同步已发布。
-- 本仓库（fork）从未发布过带播放同步的版本：fork 没有任何 tag，`plugin.json` 版本仍是 `2026.9.11`。
-- [票据 03](issues/03-manual-acceptance.md) 的发布门禁是预先约定，不是已触发的发布违规；它约束的是将来在 fork 线上发布带播放同步的版本。
-
-发版策略（2026-09-21 确认）：
-
-- 本仓库自行发布 release。`plugin.json` 的 `updateUrl` 与 `download_url` 均指向本仓库，用户从本仓库获取更新；两者必须同源，只改其一会让客户端检查后下载到另一条线的构建。
-- `plugin.json` / `package.json` 的版本号与 `download_url` 由发版工作流在发版时统一写入（`download_url` 用 `${GITHUB_REPOSITORY}` 自动适配所在仓库），日常提交不手动推进版本号。
-- 功能合并回 upstream 时使用 upstream 自己的发版配置；本仓库的地址配置随合并被替换，不需要额外还原流程。
+- 合并后 `plugin.json` 使用上游的发版配置：`updateUrl` 与 `download_url` 均指向 `songloft-org`，版本号 `2026.9.21` 与上游 `v2026.9.21` 对齐。
+- 原因：本仓库从未打过 tag、也没有 release（`git ls-remote --tags origin` 为空，GitHub releases/tags API 均返回 0），原指向本仓库 `v2026.9.11` 的 `download_url` 实际是 404 死链。
+- 若后续要在本仓库自建发布线，须先在 `Dichlorphos/songloft-plugin-miot` 打 tag 并创建 release，再把 `updateUrl` 与 `download_url` 同时改回本仓库；两者必须同源，只改其一会让客户端检查更新后下载到另一条线的构建。`Release Plugin` 工作流发版时会自动写入本仓库的 `download_url`。
+- 票据 03 的发布门禁仍约束：在 fork 线上发布带播放同步的版本前必须完成真机验收。
 
 ## 目标
 

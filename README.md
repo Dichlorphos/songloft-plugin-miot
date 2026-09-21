@@ -67,11 +67,11 @@ node frontend/tests/run.mjs   # frontend contract tests
 - `origin` = `Dichlorphos/songloft-plugin-miot`（本仓库）
 - `upstream` = `songloft-org/songloft-plugin-miot`（官方上游）
 
-两条线在 `v2026.9.11`（`c0cd929`）分叉后各自独立演进。播放同步相关代码（`src/playback_sync/`）只存在于本仓库，上游没有。**上游的 release / tag（如 `v2026.9.21`）属于官方发版线，不是本仓库的发版记录。**
+两条线在 `v2026.9.11`（`c0cd929`）分叉后各自独立演进；2026-09-21 已把上游 24 个提交合并回 `main`（合并提交 `a8f0845`）。播放同步相关代码（`src/playback_sync/`）在上游不存在，合并时按「保留本地实现 + 吸收上游同源修复」处理。
 
-本仓库**自行发布 release**：`plugin.json` 的 `updateUrl` 与 `download_url` 都指向本仓库，用户从本仓库获取更新（两者必须同源，只改其一会让客户端检查更新后下载到另一条线的构建）。
+合并后 `plugin.json` 使用上游的发版配置（`updateUrl` / `download_url` 均指向 `songloft-org`）。原因是本仓库从未打过 tag、也没有 release，原指向本仓库的 `download_url` 会直接 404。
 
-版本号与 `download_url` 由 `Release Plugin` 工作流在发版时写入，日常提交不手动推进版本号。功能合并回上游后使用上游自己的发版配置即可，本仓库的地址配置随合并被替换。
+若后续要在本仓库自建发布线：先在 `Dichlorphos/songloft-plugin-miot` 打 tag 并创建 release，再把 `updateUrl` 与 `download_url` **同时**改回本仓库（两者必须同源，只改其一会让客户端检查更新后下载到另一条线的构建）。`Release Plugin` 工作流发版时会自动写入本仓库的 `download_url`。
 
 ## 发版节奏
 
