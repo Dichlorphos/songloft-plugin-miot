@@ -181,6 +181,46 @@ test('切换采样超时（超过 2 秒）视为失败', async () => {
   assert.equal((await store.read('acc1'))?.revision, before?.revision);
 });
 
+test('快照来源不是本次源设备时：不采样、不写盘、不篡改别的设备数据', async () => {
+  const { recorder, store } = makeRecorder();
+  // 账号级快照已被同账号的另一台独立设备占据
+  await recorder.record(observation({ source_device: { account_id: 'acc1', device_id: 'devOther' }, position_sec: 30 }));
+  const before = await store.read('acc1');
+  let sampleCalls = 0;
+
+  const result = await recorder.sampleOnSwitch({
+    account_id: 'acc1',
+    device_id: 'dev1',
+    samplePosition: async () => {
+      sampleCalls++;
+      return 88;
+    },
+  });
+
+  const after = await store.read('acc1');
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'source_mismatch');
+  assert.equal(sampleCalls, 0, '来源不符时不得发起采样');
+  assert.equal(after?.source_device.device_id, 'devOther', '不得改掉别的设备的来源');
+  assert.equal(after?.position_sec, before?.position_sec, '不得把源设备的位置写进别的设备的快照');
+  assert.equal(after?.updated_at, before?.updated_at, '不得刷新别的设备的快照时间');
+  assert.equal(after?.revision, before?.revision, '不得为别的设备创建新 revision');
+});
+
+test('快照来源与源设备一致时，采样照常写回（防误伤）', async () => {
+  const { recorder, store } = makeRecorder();
+  await recorder.record(observation({ source_device: { account_id: 'acc1', device_id: 'dev1' } }));
+
+  const result = await recorder.sampleOnSwitch({
+    account_id: 'acc1',
+    device_id: 'dev1',
+    samplePosition: async () => 88,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal((await store.read('acc1'))?.position_sec, 88);
+});
+
 test('尚无快照时切换采样失败不创建快照', async () => {
   const { recorder, store } = makeRecorder();
 

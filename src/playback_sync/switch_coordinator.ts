@@ -11,7 +11,7 @@
 // 跨账号切换、源与目标相同、设备组都不同步，只更新当前选择。
 
 import { PendingContextStore, pendingKey, type PendingContext } from './pending_store.ts';
-import { PlaybackSnapshotStore, type PlaybackSnapshot } from './snapshot_store.ts';
+import { PlaybackSnapshotStore, isSnapshotFromDevice, type PlaybackSnapshot } from './snapshot_store.ts';
 import type { SwitchSampleResult } from './recorder.ts';
 import type { LandingResult } from '../player/landing_failure.ts';
 
@@ -19,7 +19,14 @@ import type { LandingResult } from '../player/landing_failure.ts';
 export interface SwitchResult {
   success: boolean;
   synced: boolean;
-  reason?: 'no_source' | 'same_device' | 'group' | 'no_snapshot' | 'sampled' | 'storage_error';
+  reason?:
+    | 'no_source'
+    | 'same_device'
+    | 'group'
+    | 'no_snapshot'
+    | 'source_mismatch'
+    | 'sampled'
+    | 'storage_error';
 }
 
 /** 设备选择提交结果；选择写入成功即 true，完整同步任务由 sync 表示。 */
@@ -251,6 +258,14 @@ export class SwitchCoordinator {
 
     const snapshot = await this.snapshotStore.read(accountId);
     if (!snapshot) return { success: true, synced: false, reason: 'no_snapshot' };
+    // 快照按账号只存一条，同账号的多台独立设备会互相覆盖。若这条观测不属于本次源设备，
+    // 它就不是「源设备的播放上下文」：不采样、不写 pending，目标保留原上下文。
+    if (!isSnapshotFromDevice(snapshot, accountId, sourceDeviceId)) {
+      this.log(
+        `[SwitchCoordinator] snapshot source mismatch: expected ${sourceDeviceId}, got ${snapshot.source_device.device_id}`,
+      );
+      return { success: true, synced: false, reason: 'source_mismatch' };
+    }
     // 过期的基线不再同步：规范要求此时若采样成功可建新 revision，采样失败则保持原状。
     const expired = this.snapshotStore.isExpired(snapshot, this.now());
 
@@ -265,17 +280,25 @@ export class SwitchCoordinator {
           sampled = result.snapshot;
         } else if (!result.ok) {
           this.log(`[SwitchCoordinator] switch sample skipped reason=${result.reason ?? 'unknown'}`);
-          // 采样窗口有 2 秒，期间源设备可能已经自动切歌/切歌单并写入更新的出口快照，
-          // 使本次采样写回被判 stale。那时读取时的旧快照已经过期：继续用它会让目标设备
-          // 恢复成「已经过去的那首」。改读当前快照——只有它仍来自同一台源设备时才采用，
-          // 否则会把同账号另一台设备的内容张冠李戴成这个目标的待播放上下文。
-          if (result.reason === 'stale') {
+          // 采样窗口内这条账号级快照可能被同账号的另一台设备整个覆盖：此时采样在
+          // 前置校验处判 source_mismatch；若只是写入落败则为 stale。两者都重读当前
+          // 快照，且只有它仍来自源设备时才采用，否则回退到本次切换开始时读到的、
+          // 确属源设备的那份快照。
+          if (result.reason === 'stale' || result.reason === 'source_mismatch') {
             sampled = await this.readFreshSnapshotForSource(accountId, sourceDeviceId) ?? sampled;
           }
         }
       } catch (e) {
         this.log(`[SwitchCoordinator] switch sample failed: ${String(e)}`);
       }
+    }
+
+    // 写 pending 前最后复查来源：拦的是「前两道校验之后、真正落盘之前」的最后一段窗口。
+    if (!isSnapshotFromDevice(sampled, accountId, sourceDeviceId)) {
+      this.log(
+        `[SwitchCoordinator] sampled snapshot source mismatch: expected ${sourceDeviceId}, got ${sampled.source_device.device_id}`,
+      );
+      return { success: true, synced: false, reason: 'source_mismatch' };
     }
 
     // 过期且采样未产生新 revision 时不同步：目标保持原上下文。

@@ -81,6 +81,7 @@ export function resetSwitchCoordinatorForTest(): void {
 
 export {
   PlaybackSnapshotStore,
+  isSnapshotFromDevice,
   PLAYBACK_SNAPSHOT_STORAGE_KEY,
   PLAYBACK_SNAPSHOT_TTL_MS,
 } from './snapshot_store.ts';

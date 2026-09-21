@@ -67,6 +67,16 @@ function isSourceDevice(value: unknown): value is PlaybackSourceDevice {
   return isObject(value) && typeof value.account_id === 'string' && typeof value.device_id === 'string';
 }
 
+/**
+ * 快照是否确实由给定设备产生（账号与设备都要一致）。
+ *
+ * 快照按账号只存一条，同账号的多台独立设备会互相覆盖这条观测。凡是「拿某台设备的
+ * 快照做别的事」的路径，都要先用它确认来源，否则会把别的设备的内容张冠李戴。
+ */
+export function isSnapshotFromDevice(snapshot: PlaybackSnapshot, accountId: string, deviceId: string): boolean {
+  return snapshot.source_device.account_id === accountId && snapshot.source_device.device_id === deviceId;
+}
+
 /** 单条快照校验：字段错误只忽略该条，不牵连其它账号。pending 内层副本复用同一套校验。 */
 export function isValidSnapshot(value: unknown): value is PlaybackSnapshot {
   if (!isObject(value)) return false;

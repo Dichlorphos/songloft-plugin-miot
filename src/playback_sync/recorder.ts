@@ -8,6 +8,7 @@
 
 import {
   PlaybackSnapshotStore,
+  isSnapshotFromDevice,
   type NewPlaybackSnapshot,
   type PlaybackContentType,
   type PlaybackSnapshotState,
@@ -47,7 +48,7 @@ export interface SwitchSampleRequest {
 
 export interface SwitchSampleResult {
   ok: boolean;
-  reason?: 'no_snapshot' | 'sample_failed' | 'stale' | 'storage_error';
+  reason?: 'no_snapshot' | 'source_mismatch' | 'sample_failed' | 'stale' | 'storage_error';
   /** 采样成功并写入后，返回新 revision 的快照；失败时缺省。 */
   snapshot?: PlaybackSnapshot;
 }
@@ -107,6 +108,11 @@ export class PlaybackRecorder {
     const current = await this.store.read(request.account_id);
     if (!current) {
       return { ok: false, reason: 'no_snapshot' };
+    }
+    // 账号级快照可能已被同账号的另一台独立设备覆盖。此时它不属于本次源设备，
+    // 拿源设备的物理位置去刷新它，等于篡改别的设备的数据——既不采样也不写回。
+    if (!isSnapshotFromDevice(current, request.account_id, request.device_id)) {
+      return { ok: false, reason: 'source_mismatch' };
     }
     // 采样是在当前快照之上刷新位置，取新序号即可。
 

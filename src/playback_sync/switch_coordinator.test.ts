@@ -430,12 +430,15 @@ test('设备选择提交后立即返回，慢采样仍在后台完成', async ()
 });
 
 test('同一目标连续选择时，先发任务的晚到 pending 不得覆盖后发', async () => {
+  // 账号级快照只存一条，所以「源设备不同」的两次切换要各自读到属于自己源设备的那条快照：
+  // 先发任务读 devA 的快照，采样窗口内 devX 开始播放把账号级快照改成 devX，后发任务再读。
+  // 这正是票据 05 的来源不变量：每条快照只能被它自己的来源设备使用。
   const sources = ['devA', 'devX'];
   let selectionIndex = 0;
   const release: Array<() => void> = [];
   const sampled = [
-    snapshot({ revision: 2, position_sec: 42 }),
-    snapshot({ revision: 3, position_sec: 55 }),
+    snapshot({ revision: 2, position_sec: 42, source_device: { account_id: 'acc1', device_id: 'devA' } }),
+    snapshot({ revision: 3, position_sec: 55, source_device: { account_id: 'acc1', device_id: 'devX' } }),
   ];
   let sampleIndex = 0;
 
@@ -462,6 +465,12 @@ test('同一目标连续选择时，先发任务的晚到 pending 不得覆盖�
   });
 
   const first = await coordinator.beginDeviceSelection('acc1', 'devB');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  // 先发任务已读到 devA 的快照并进入采样；此刻 devX 开始播放，账号级快照转为 devX。
+  snapshotStorage.dump().playback_snapshot_v1 = JSON.stringify({
+    schema_version: 1,
+    snapshots: { acc1: snapshot({ source_device: { account_id: 'acc1', device_id: 'devX' } }) },
+  });
   const second = await coordinator.beginDeviceSelection('acc1', 'devB');
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(release.length, 2, '两个后台同步都应开始采样');

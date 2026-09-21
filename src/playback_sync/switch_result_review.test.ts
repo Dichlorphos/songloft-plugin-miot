@@ -452,6 +452,95 @@ test('采样被判 stale 但更新的是别的源设备时，不得张冠李戴'
   assert.equal(pending?.snapshot.source_device.device_id, 'devA');
 });
 
+test('初始读到的快照不属于本次源设备时：不采样、不写 pending', async () => {
+  // 同账号的 devC 最后写过快照，账号级那条观测属于 devC，不是本次源设备 devA。
+  const snapshotStorage = await seededSnapshotStorage('acc1', 'devC');
+  const pendingStore = new PendingContextStore(memoryStorage());
+  let sampleCalls = 0;
+  const coordinator = new SwitchCoordinator({
+    snapshotStore: new PlaybackSnapshotStore(snapshotStorage),
+    pendingStore,
+    now: () => 10_000,
+    getCurrentDevice: async () => 'devA',
+    setCurrentDevice: async () => {},
+    isGroupDevice: async () => false,
+    sampleOnSwitch: async () => {
+      sampleCalls++;
+      return { ok: true, snapshot: snapshot() };
+    },
+    loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
+    playPlaylist: async () => 'dispatched',
+  });
+
+  const result = await coordinator.onDeviceSelected('acc1', 'devB');
+
+  assert.equal(result.success, true, '切换本身仍成功');
+  assert.equal(result.synced, false);
+  assert.equal(result.reason, 'source_mismatch');
+  assert.equal(sampleCalls, 0, '来源不符时不得发起采样');
+  assert.equal(await pendingStore.read('acc1', 'devB', 10_000), null, '不得把别的设备的内容排进本目标');
+});
+
+test('采样依赖返回的快照来源不符时，协调器在落盘前拒绝写入 pending', async () => {
+  // 第三道校验守的是协调器自己的不变量，而不是 recorder 的实现细节：即使注入的采样
+  // 依赖违反了「返回快照必属源设备」的契约（这里直接塞一条 devC 的快照），协调器也
+  // 必须在写 pending 之前拦下它，绝不让别的设备的内容进入本目标的待播放上下文。
+  const snapshotStorage = await seededSnapshotStorage('acc1', 'devA');
+  const pendingStore = new PendingContextStore(memoryStorage());
+  const coordinator = new SwitchCoordinator({
+    snapshotStore: new PlaybackSnapshotStore(snapshotStorage),
+    pendingStore,
+    now: () => 10_000,
+    getCurrentDevice: async () => 'devA',
+    setCurrentDevice: async () => {},
+    isGroupDevice: async () => false,
+    sampleOnSwitch: async () => ({
+      ok: true,
+      snapshot: snapshot({ source_device: { account_id: 'acc1', device_id: 'devC' }, song_id: 99 }),
+    }),
+    loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
+    playPlaylist: async () => 'dispatched',
+  });
+
+  const result = await coordinator.onDeviceSelected('acc1', 'devB');
+
+  assert.equal(result.success, true);
+  assert.equal(result.synced, false);
+  assert.equal(result.reason, 'source_mismatch');
+  assert.equal(await pendingStore.read('acc1', 'devB', 10_000), null, '来源不符的快照不得落盘');
+});
+
+test('采样期间被别的设备覆盖（source_mismatch）时回退源设备快照，不采用别的设备内容', async () => {
+  const storage = memoryStorage();
+  const snapshotStore = new PlaybackSnapshotStore(storage);
+  const recorder = new PlaybackRecorder(snapshotStore, { now: () => 1_000 });
+  await recorder.record(observationOf(11, 'devA'));
+
+  const pendingStore = new PendingContextStore(memoryStorage());
+  const coordinator = new SwitchCoordinator({
+    snapshotStore,
+    pendingStore,
+    now: () => 10_000,
+    getCurrentDevice: async () => 'devA',
+    setCurrentDevice: async () => {},
+    isGroupDevice: async () => false,
+    sampleOnSwitch: async () => {
+      // 采样窗口内 devC 抢先写入，采样入口的前置校验判 source_mismatch
+      await recorder.record(observationOf(33, 'devC'));
+      return { ok: false, reason: 'source_mismatch' as const };
+    },
+    loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
+    playPlaylist: async () => 'dispatched',
+  });
+
+  const result = await coordinator.onDeviceSelected('acc1', 'devB');
+
+  const pending = await pendingStore.read('acc1', 'devB', 10_000);
+  assert.equal(result.synced, true, '仍应为源设备排入待播放上下文');
+  assert.equal(pending?.snapshot.song_id, 11, '必须回退到源设备的内容，而不是后写入的 devC');
+  assert.equal(pending?.snapshot.source_device.device_id, 'devA');
+});
+
 test('采样失败（非 stale）仍保留旧快照，不受本改动影响', async () => {
   const storage = memoryStorage();
   const snapshotStore = new PlaybackSnapshotStore(storage);
