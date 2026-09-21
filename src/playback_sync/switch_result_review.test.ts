@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { SwitchCoordinator } from './switch_coordinator.ts';
 import { PendingContextStore, PENDING_CONTEXT_STORAGE_KEY, PENDING_CONTEXT_TTL_MS } from './pending_store.ts';
 import { PlaybackSnapshotStore, type PlaybackSnapshot } from './snapshot_store.ts';
+import { PlaybackRecorder, type PlaybackObservation } from './recorder.ts';
 import type { EnvelopeStorage } from './envelope_store.ts';
 import { isDeviceInGroup } from './host_deps.ts';
 
@@ -23,6 +24,25 @@ function memoryStorage(options: { failGet?: boolean } = {}): EnvelopeStorage {
     async set(key, value) {
       map.set(key, value);
     },
+  };
+}
+
+function observationOf(songId: number, deviceId = 'devA'): PlaybackObservation {
+  return {
+    account_id: 'acc1',
+    content_type: 'playlist',
+    song_id: songId,
+    playlist_id: 7,
+    song_index: 0,
+    position_sec: 30,
+    position_available: true,
+    speed: 1,
+    play_mode: 'order',
+    state: 'playing',
+    source_device: { account_id: 'acc1', device_id: deviceId },
+    target_count: 1,
+    title: 'T',
+    artist: 'A',
   };
 }
 
@@ -367,6 +387,94 @@ test('不同目标设备的继续操作互不阻塞', async () => {
   await Promise.all([b, c]);
 
   assert.equal(bothStarted, 2, '两个不同目标都必须立刻开始，不能被对方的消费挡住');
+});
+
+test('采样被判 stale 时改用存储里更新的快照（同一源设备）', async () => {
+  // 采样窗口是 2 秒。期间自动切歌会写入一条更新的出口快照，使本次采样写回被判 stale。
+  // 此时若仍把「读取时的旧快照」写进 pending，目标设备恢复时会播成已经过去的那首。
+  const storage = memoryStorage();
+  const snapshotStore = new PlaybackSnapshotStore(storage);
+  const recorder = new PlaybackRecorder(snapshotStore, { now: () => 1_000 });
+  await recorder.record(observationOf(11));
+
+  const pendingStore = new PendingContextStore(memoryStorage());
+  let current = 'devA';
+  const coordinator = new SwitchCoordinator({
+    snapshotStore,
+    pendingStore,
+    now: () => 10_000,
+    getCurrentDevice: async () => current,
+    setCurrentDevice: async (_a, deviceId) => { current = deviceId; },
+    isGroupDevice: async () => false,
+    sampleOnSwitch: async () => {
+      // 采样进行中：源设备自动切到下一首并落盘，本次采样写回因此失败
+      await recorder.record(observationOf(22));
+      return { ok: false, reason: 'stale' as const };
+    },
+    loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
+    playPlaylist: async () => 'succeeded',
+  });
+
+  await coordinator.onDeviceSelected('acc1', 'devB');
+
+  const pending = await pendingStore.read('acc1', 'devB', 10_000);
+  assert.equal(pending?.snapshot.song_id, 22, '必须用存储里更新的那首，而不是读取时的旧快照');
+});
+
+test('采样被判 stale 但更新的是别的源设备时，不得张冠李戴', async () => {
+  // 快照存储是按账号的。若那条更新来自同账号的另一个设备，就不能把它写进本目标的 pending。
+  const storage = memoryStorage();
+  const snapshotStore = new PlaybackSnapshotStore(storage);
+  const recorder = new PlaybackRecorder(snapshotStore, { now: () => 1_000 });
+  await recorder.record(observationOf(11, 'devA'));
+
+  const pendingStore = new PendingContextStore(memoryStorage());
+  const coordinator = new SwitchCoordinator({
+    snapshotStore,
+    pendingStore,
+    now: () => 10_000,
+    getCurrentDevice: async () => 'devA',
+    setCurrentDevice: async () => {},
+    isGroupDevice: async () => false,
+    sampleOnSwitch: async () => {
+      // 同账号的另一台设备（devC）抢先写入
+      await recorder.record(observationOf(33, 'devC'));
+      return { ok: false, reason: 'stale' as const };
+    },
+    loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
+    playPlaylist: async () => 'succeeded',
+  });
+
+  await coordinator.onDeviceSelected('acc1', 'devB');
+
+  const pending = await pendingStore.read('acc1', 'devB', 10_000);
+  assert.equal(pending?.snapshot.song_id, 11, '别的设备的内容不得写成本目标的待播放上下文');
+  assert.equal(pending?.snapshot.source_device.device_id, 'devA');
+});
+
+test('采样失败（非 stale）仍保留旧快照，不受本改动影响', async () => {
+  const storage = memoryStorage();
+  const snapshotStore = new PlaybackSnapshotStore(storage);
+  const recorder = new PlaybackRecorder(snapshotStore, { now: () => 1_000 });
+  await recorder.record(observationOf(11));
+
+  const pendingStore = new PendingContextStore(memoryStorage());
+  const coordinator = new SwitchCoordinator({
+    snapshotStore,
+    pendingStore,
+    now: () => 10_000,
+    getCurrentDevice: async () => 'devA',
+    setCurrentDevice: async () => {},
+    isGroupDevice: async () => false,
+    sampleOnSwitch: async () => ({ ok: false, reason: 'sample_failed' as const }),
+    loadSong: async (songId) => ({ id: songId, type: 'remote', title: 'T', artist: 'A', duration: 200, url: 'u' }),
+    playPlaylist: async () => 'succeeded',
+  });
+
+  await coordinator.onDeviceSelected('acc1', 'devB');
+
+  const pending = await pendingStore.read('acc1', 'devB', 10_000);
+  assert.equal(pending?.snapshot.song_id, 11, '采样失败保留旧快照');
 });
 
 test('确实没有 pending 时仍返回 none，保持既有回退行为', async () => {

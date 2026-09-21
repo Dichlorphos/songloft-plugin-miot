@@ -251,6 +251,13 @@ export class SwitchCoordinator {
           sampled = result.snapshot;
         } else if (!result.ok) {
           this.log(`[SwitchCoordinator] switch sample skipped reason=${result.reason ?? 'unknown'}`);
+          // 采样窗口有 2 秒，期间源设备可能已经自动切歌/切歌单并写入更新的出口快照，
+          // 使本次采样写回被判 stale。那时读取时的旧快照已经过期：继续用它会让目标设备
+          // 恢复成「已经过去的那首」。改读当前快照——只有它仍来自同一台源设备时才采用，
+          // 否则会把同账号另一台设备的内容张冠李戴成这个目标的待播放上下文。
+          if (result.reason === 'stale') {
+            sampled = await this.readFreshSnapshotForSource(accountId, sourceDeviceId) ?? sampled;
+          }
         }
       } catch (e) {
         this.log(`[SwitchCoordinator] switch sample failed: ${String(e)}`);
@@ -378,6 +385,24 @@ export class SwitchCoordinator {
       this.log(`[SwitchCoordinator] resume pending failed: ${String(e)}`);
       return { outcome: 'failed' };
     }
+  }
+
+  /**
+   * 采样被判 stale 后重读当前快照，仅当它仍属于同一台源设备时返回。
+   *
+   * 快照按账号存一条：同账号别的设备写入时，这条快照与本次切换的源设备无关，
+   * 不能拿来当这个目标的待播放上下文。
+   */
+  private async readFreshSnapshotForSource(accountId: string, sourceDeviceId: string): Promise<PlaybackSnapshot | null> {
+    try {
+      const fresh = await this.snapshotStore.read(accountId);
+      if (fresh && fresh.source_device.account_id === accountId && fresh.source_device.device_id === sourceDeviceId) {
+        return fresh;
+      }
+    } catch (e) {
+      this.log(`[SwitchCoordinator] re-read snapshot after stale failed: ${String(e)}`);
+    }
+    return null;
   }
 
   /** 内容代际是否仍是消费开始时的那一代；变了说明已被「选择新内容」作废。 */
