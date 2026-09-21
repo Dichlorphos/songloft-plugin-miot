@@ -897,66 +897,6 @@ export function registerPlaylistHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-
-  // POST /player/song/remove - 从歌单删除歌曲（可选：同时从曲库删除）
-  //
-  // 语音场景需求（songloft-org/songloft#465）：听音箱时遇到不想的歌不必切回本地
-  // 歌单模式再删。此端点做三件事：
-  //   1) 从传入歌单移除该歌曲（临时歌单不涉盘，只改内存；真实歌单调 bridge）
-  //   2) 若删的正是该设备当前在播那首，先切下一首，再从内存队列摘掉
-  //   3) 可选：同时把歌曲从曲库物理删除
-  router.post('/player/song/remove', async (req: HTTPRequest) => {
-    try {
-      const body = parseBody(req);
-      const playlistId = Number(body.playlist_id);
-      const songId = Number(body.song_id);
-      const fromLibrary = body.from_library === true;
-      const account_id = String(body.account_id || '');
-      const device_id = String(body.device_id || '');
-      if (!playlistId || isNaN(playlistId)) {
-        return jsonResponse({ success: false, error: 'playlist_id is required' });
-      }
-      if (!songId || isNaN(songId)) {
-        return jsonResponse({ success: false, error: 'song_id is required' });
-      }
-
-      // 1) 从歌单删除。临时歌单没有持久化记录，跳过 bridge；bridge 把「本不在歌单里」
-      // 当幂等成功，重复点击不会报错。
-      if (!isTempPlaylistId(playlistId)) {
-        await songloft.playlists.removeSongs(playlistId, [songId]);
-      }
-
-      // 2) 若这台设备在这个歌单上正播的就是被删的这首，先切下一首。
-      if (account_id && device_id) {
-        const manager = playlistManagerMap.get(account_id, device_id);
-        if (manager) {
-          const status = manager.getStatus();
-          if (status.playlist_id === playlistId) {
-            if (status.current_song?.id === songId) {
-              await manager.next();
-            }
-            await manager.removeSongFromMemory(songId);
-          }
-        }
-      }
-
-      // 3) 可选：从曲库物理删除。
-      if (fromLibrary) {
-        try {
-          await songloft.songs.delete(songId);
-        } catch (e: any) {
-          const msg = e?.message || String(e);
-          if (!/not found/i.test(msg)) {
-            return jsonResponse({ success: false, error: msg });
-          }
-        }
-      }
-
-      return jsonResponse({ success: true, data: { removed: true, from_library: fromLibrary } });
-    } catch (e: any) {
-      return jsonResponse({ success: false, error: e.message || String(e) });
-    }
-  });
   });
 
   // POST /player/song/remove - 从歌单删除歌曲（可选：同时从曲库删除）

@@ -286,3 +286,22 @@
 - 相关链接：本文件 Node.js 24 原生跑 TS 测试条目（同属本仓库 Node 工具链限制）
 - 复现记录：
   - 2026-09-21：合并 upstream/main 时首次跑 patch-id 映射，30s/60s 轮询均未返回；改用缓存 map + 加大 maxBuffer 后仍需约 110s，最终成功。
+
+### 2026-09-21 — git — 自动合并把两侧各自新增的同一路由拼接成「重复注册 + 嵌套死代码」
+
+- 状态：resolved
+- 工具及版本：git（Windows）；仓库为 fork 与 upstream 长期分叉后的首次合并（`1e3d5e7` + `73c925b`）
+- 环境：Windows 11 + PowerShell 7；被改文件 `src/handlers/playlist.ts`
+- 现象：`git merge upstream/main` **没有**把 `src/handlers/playlist.ts` 列为冲突，但合并结果里 `/player/song/remove` 出现了两次：先是一份被卷进 `/player/favorite/toggle` handler 函数体内（`depth=2`，模块初始化时不注册、只在收藏请求处理期间动态注册），随后才是真正生效的那份（`depth=1`）。模块总括号仍然平衡，因此语法合法。
+- 原始错误：无报错。`tsc --noEmit` 通过、`npm test` 通过、`npm run build` 通过；只有 AST/结构化扫描能发现。
+- 根因（两层）：
+  1. **两侧独立新增同一路由**：fork 与 upstream 都新增了 `/player/song/remove`，且各自新增位置相邻；git 的文本合并对「同一位置的两段独立新增」可以无冲突地全部保留，得到两份实现。
+  2. **一侧的新增依赖后续行作为自身闭合**：fork 版的 `router.post(...)` 少一个 `});`，靠紧随其后的 `});` 闭合。上游版把带完整闭合的实现插到两者之间后，那个「借来的」`});` 被错配，导致前一份注册被折进上一个 handler 的函数体。两侧文本各自都自洽，拼接后才产生结构错位。
+- 解决方案或规避方案：
+  1. 合并后除了跑 `tsc` / 测试，**再扫一遍路由或导出等「注册型」语句的结构位置**：例如用 TypeScript AST 断言所有 `router.{get,post,put,delete}` 调用都不得位于箭头函数/函数表达式内部，且同一路径只出现一次。本次已固化为 `src/handlers/playlist_route_registration.test.ts`。
+  2. 纯文本的 grep/计数检查不够：本例中两份实现文本高度相似，且注释措辞不同，靠肉眼与 `grep -c` 都要先知道该查什么。AST 检查能把「嵌套」与「重复」直接变成断言。
+  3. 合并时对**双方都新增了同一个东西**的文件提高警惕（同一端点、同一函数、同一配置键）：git 可能无冲突地把两版都留下，而语义上只应保留一份。
+- 验证：AST 守卫测试在修复前实测变红（`POST /player/song/remove @ line 908`），删除重复实现并补回闭合后转绿；`npm test` 259 项、`npm run typecheck`、前端契约测试、`npm run validate`、`npm run build` 全部通过。
+- 相关链接：`.scratch/playback-sync/issues/06-merge-residue-duplicate-route.md`；本文件「用 patch-id 识别 fork 与上游重复提交」条目（同属长分叉合并的坑）
+- 复现记录：
+  - 2026-09-21：`/code-review` 全局审核（Spec 轴）发现；合并当日 typecheck 与全部测试均未报警。
