@@ -174,6 +174,7 @@
 - 相关链接：`docs/agents/tool-issues.md` 的构建污染条目（同源 CRLF 问题）、`.scratch/playback-sync/` 下本次改动
 - 复现记录：
   - 2026-09-21：本任务中 `.Replace` 静默 no-op 1 次，here-string 反引号误转义 3 次。
+  - 2026-09-21（框架级需求审核任务）：再次命中同一坑。省略 shell 的多条命令落到 bash 后，git status --porcelain=v1;、git merge-base --is-ancestor cb2d28f HEAD; 被 bash 当成带分号的路径或未知选项；显式写 shell: 'powershell' 后立刻恢复正常。
 
 ### 2026-09-21 — exec_command — 直接写临时脚本的 here-string/内联 Node 脚本被沙箱策略拒绝或转义失败
 
@@ -228,3 +229,21 @@
 - 相关链接：`node_modules/@songloft/plugin-builder/dist/cli.js`、`frontend/package.json`、`package.json`、用户级 `~/.npmrc`
 - 复现记录：
   - 2026-09-21：在本机 `~/.npmrc` 含 `allow-scripts = ["@xai-official/grok"]` 时执行 `npm run build`，在 `frontend/` 的依赖安装阶段必现 `EALLOWSCRIPTS`；改用空 `--userconfig` 完成安装后构建通过。
+### 2026-09-21 — PowerShell — 单元素数组参数被绑定展平，`[object[]]$pairs` 收到的是字符串
+
+- 状态：workaround
+- 工具及版本：PowerShell 7 (pwsh)
+- 环境：Windows 11 + 本项目仓库；用辅助函数批量改 Markdown
+- 现象：把 `@( @{Old=...; New=...} )` 传给 `function Patch($p,[object[]]$pairs)` 时，循环里的 `$pair[0]` 取到的是字符而非 `Old`，报“`[System.Char]` 不包含名为 `Substring` 的方法”；替换实际未执行，却打印了后续成功信息。
+- 原始错误：`方法调用失败，因为 [System.Char] 不包含名为 'Substring' 的方法`
+- 根因：
+  1. PowerShell 会把单元素数组在参数绑定时展平，`@( @{...} )` 到函数内可能变成单个 `Hashtable`，再按索引取到的是值字符串的第一个字符。
+  2. 同一函数里用 `$pair[0]` / `$pair[1]` 索引，既掩盖了展平，也让“定位失败”与“替换成功”共用一条输出路径，失败后仍继续打印成功。
+- 解决方案或规避方案：
+  1. 不要把“待替换项”建模成位置数组；改用 `@{Old=...; New=...}` 属性访问，避免索引语义。
+  2. 辅助函数里每个 `$old` 都必须先 `if(-not $s.Contains($old)){ throw ... }`，替换后再写盘；不要先打印成功再校验。
+  3. 批量改文件优先走带断言的 Node 脚本，和现有 here-string 条目保持一致。
+- 验证：改用 `@{Old=...; New=...}` 后同一批文档补丁稳定生效；期间因索引错误导致的误写已用 `git checkout -- <file>` 回滚，未进入提交。
+- 相关链接：`docs/agents/tool-issues.md` 的 PowerShell here-string 条目（同属 PowerShell 文本处理坑）、`.scratch/playback-sync/spec.md`、`docs/adr/0003-landing-confirmation-gates-pending-clearance.md`
+- 复现记录：
+  - 2026-09-21：对 `docs/adr/0003-...md` 与 `.scratch/playback-sync/issues/03-manual-acceptance.md` 批量补丁时命中；ADR 的“整整行为”错别字也因该缺陷未被定位。
