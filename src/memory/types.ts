@@ -3,7 +3,7 @@ export type MemoryTargetType = 'play_song' | 'play_playlist';
 export const DEFAULT_MEMORY_MAX_RECORDS = 100;
 export const MIN_MEMORY_MAX_RECORDS = 10;
 // 上限仅约束「自动学习」记录；手动别名（manualAlias）由用户显式维护，
-// 不计数也不参与淘汰，因此不受此上限影响。
+// 不计数也不参与淘汰，因此不受此上限影响（见 enforceLimit）。
 export const MAX_MEMORY_MAX_RECORDS = 5000;
 
 export function normalizeMemoryMaxRecords(value: unknown): number {

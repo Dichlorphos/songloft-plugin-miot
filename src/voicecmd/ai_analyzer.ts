@@ -3,7 +3,7 @@
 
 /// <reference types="@songloft/plugin-sdk" />
 
-import { aiChatCompletionsUrl } from '../utils/ai_url';
+import { aiChatCompletionsUrl, maskUrl } from '../utils/ai_url';
 import type { AIConfig, AIAnalysisResult } from '../types';
 
 /** AI System Prompt */
@@ -13,6 +13,7 @@ const AI_SYSTEM_PROMPT = `从指令中提取出操作和音乐信息，返回JSO
 - play_song: name(歌曲名), artist(歌手名)
 - play_artist: artist(歌手名)
 - play_playlist: playlist(歌单名)
+- play_index: index(整数,从1起,跳到当前歌单的第N首)
 - set_play_mode: mode=order|random|single|loop|singlePlay(播放模式，singlePlay 表示当前歌曲播完停止)
 - favorite: action=add|remove(收藏/取消收藏当前歌曲)
 - sleep_timer: duration(分钟数,整数)或songs_count(曲目数,整数)，两者只填一个。定时停止播放。
@@ -50,7 +51,9 @@ const AI_SYSTEM_PROMPT = `从指令中提取出操作和音乐信息，返回JSO
 继续播放→{"action":"resume","params":{},"confidence":"high","rawText":"继续播放"}
 恢复播放→{"action":"resume","params":{},"confidence":"high","rawText":"恢复播放"}
 暂停播放→{"action":"pause","params":{},"confidence":"high","rawText":"暂停播放"}
-停止播放→{"action":"stop","params":{},"confidence":"high","rawText":"停止播放"}`;
+停止播放→{"action":"stop","params":{},"confidence":"high","rawText":"停止播放"}
+播放第300首→{"action":"play_index","params":{"index":300},"confidence":"high","rawText":"播放第300首"}
+跳到第五十首→{"action":"play_index","params":{"index":50},"confidence":"high","rawText":"跳到第50首"}`;
 
 /**
  * AI 口令分析器
@@ -94,7 +97,9 @@ export class AIAnalyzer {
    * 调用 LLM API
    */
   private async callAI(query: string, config: AIConfig): Promise<AIAnalysisResult> {
-    songloft.log.info(`[AIAnalyzer] Calling ${aiChatCompletionsUrl(config.api_url)} model=${config.model} timeout=${config.timeout}s`);
+    // 与模型列表端点共用同一套 /v1 归一化规则，避免两处对 api_url 的假设不一致
+    const endpoint = aiChatCompletionsUrl(config.api_url);
+    songloft.log.info(`[AIAnalyzer] Calling ${maskUrl(endpoint)} model=${config.model} timeout=${config.timeout}s`);
 
     const messages = [
       { role: 'system', content: AI_SYSTEM_PROMPT },
@@ -108,13 +113,13 @@ export class AIAnalyzer {
       max_tokens: 300,
       response_format: { type: 'json_object' },
     };
-    // reasoning_split 仅硅基流动原生支持，用于分离推理链使 content 直接是干净 JSON；
-    // 其它 OpenAI 兼容接口对未知字段或忽略或严格 400，故按 api_url 条件附加。
+    // reasoning_split 仅硅基流动（SiliconFlow）原生支持，用于分离推理链使 content 直接是干净 JSON；
+    // 其它 OpenAI 兼容接口对未知字段或忽略或严格 400，故按 api_url 条件附加，避免误伤。
     if (/siliconflow/i.test(config.api_url || '')) {
       body.extra_body = { reasoning_split: true };
     }
 
-    const fetchPromise = fetch(aiChatCompletionsUrl(config.api_url), {
+    const fetchPromise = fetch(endpoint, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${config.api_key}`,
@@ -182,7 +187,9 @@ export class AIAnalyzer {
       .replace(/<(?:think|thought)>[\s\S]*?<\/(?:think|thought)>/gi, '')
       .replace(/[\[\]<>/?]*(?:think|思考|THINK)[\[\]<>/?]*/gi, '')
       .trim();
-    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+
+    // 去掉外层 markdown 代码块包裹 (如 ```json ... ``` 或 ``` ... ```)
+    cleaned = cleaned.replace(/^\`\`\`(?:json)?\s*/i, '').replace(/\s*\`\`\`\s*$/i, '').trim();
 
     const firstBrace = cleaned.indexOf('{');
     if (firstBrace === -1) {
@@ -191,7 +198,8 @@ export class AIAnalyzer {
 
     let end = cleaned.lastIndexOf('}');
     let jsonStr = '';
-    let parsed: any = null;
+    let parsed = null;
+
     while (end > firstBrace) {
       try {
         jsonStr = cleaned.slice(firstBrace, end + 1);

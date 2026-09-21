@@ -958,4 +958,71 @@ export function registerPlaylistHandlers(
     }
   });
   });
+
+  // POST /player/song/remove - 从歌单删除歌曲（可选：同时从曲库删除）
+  //
+  // 语音场景需求（songloft-org/songloft#465）：用户听音箱时不想的歌不必切回本地
+  // 歌单模式再删。此端点做两件事：
+  //   1) 从传入的歌单里移除该歌曲（临时歌单不涉盘，只改内存；真实歌单调 bridge）
+  //   2) 可选：同时把歌曲从曲库物理删除（含封面/缓存清理，songs.write 权限）
+  // 若删的正是本设备当前在播的那首，先切下一首（next() 会推 URL + 持久化），
+  // 再从内存队列摘掉它，避免"删完后音箱还继续播那首已消失的歌"。
+  router.post('/player/song/remove', async (req: HTTPRequest) => {
+    try {
+      const body = parseBody(req);
+      const playlistId = Number(body.playlist_id);
+      const songId = Number(body.song_id);
+      const fromLibrary = body.from_library === true;
+      const account_id = String(body.account_id || '');
+      const device_id = String(body.device_id || '');
+      if (!playlistId || isNaN(playlistId)) {
+        return jsonResponse({ success: false, error: 'playlist_id is required' });
+      }
+      if (!songId || isNaN(songId)) {
+        return jsonResponse({ success: false, error: 'song_id is required' });
+      }
+
+      // 1) 从歌单删除。临时歌单没有持久化记录，跳过 bridge；bridge 内部把
+      // 「歌曲本不在歌单里」当幂等成功，重复点击不会报错。
+      if (!isTempPlaylistId(playlistId)) {
+        await songloft.playlists.removeSongs(playlistId, [songId]);
+      }
+
+      // 2) 若这台设备在这个歌单上正播的就是被删的这首，先切下一首。
+      // 只考虑请求里指定的设备：其它设备各自的队列由自己的下次拉取来更新。
+      if (account_id && device_id) {
+        const manager = playlistManagerMap.get(account_id, device_id);
+        if (manager) {
+          const status = manager.getStatus();
+          const managerPlaylistMatches = status.playlist_id === playlistId;
+          if (managerPlaylistMatches) {
+            const currentSongId = status.current_song?.id;
+            if (currentSongId === songId) {
+              // next() 内部：若队列还剩其它歌就切并推 URL，否则 stop
+              await manager.next();
+            }
+            await manager.removeSongFromMemory(songId);
+          }
+        }
+      }
+
+      // 3) 可选：从曲库物理删除。收藏歌单不会自动把「已收藏」标记清掉——
+      // 这里删的是歌曲本体，收藏列表里那条记录随着歌曲的消失自然失效。
+      if (fromLibrary) {
+        try {
+          await songloft.songs.delete(songId);
+        } catch (e: any) {
+          // 歌曲不在曲库不算错（可能之前已被别处删过）；其它错误按原样上抛。
+          const msg = e?.message || String(e);
+          if (!/not found/i.test(msg)) {
+            return jsonResponse({ success: false, error: msg });
+          }
+        }
+      }
+
+      return jsonResponse({ success: true, data: { removed: true, from_library: fromLibrary } });
+    } catch (e: any) {
+      return jsonResponse({ success: false, error: e.message || String(e) });
+    }
+  });
 }

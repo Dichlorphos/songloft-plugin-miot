@@ -128,26 +128,63 @@ export class SleepTimer {
 
 /**
  * 中文数字转阿拉伯数字（覆盖语音识别常见输出）
+ * 支持 1-9999 范围：个/十/百/千位组合，如 "三百"、"五百二十"、"一千二百三十"。
  */
 function chineseToNumber(text: string): string {
-  const digitMap: Record<string, string> = {
-    '零': '0', '一': '1', '二': '2', '两': '2', '三': '3', '四': '4',
-    '五': '5', '六': '6', '七': '7', '八': '8', '九': '9',
+  const digitMap: Record<string, number> = {
+    '零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,
+    '五': 5, '六': 6, '七': 7, '八': 8, '九': 9,
   };
-  // "N十M" → (N*10+M), "十M" → (10+M), "N十" → (N*10)
-  let result = text;
-  result = result.replace(/([一二两三四五六七八九])十([一二三四五六七八九])/g, (_, a, b) =>
-    String(parseInt(digitMap[a]) * 10 + parseInt(digitMap[b])));
-  result = result.replace(/([一二两三四五六七八九])十/g, (_, a) =>
-    String(parseInt(digitMap[a]) * 10));
-  result = result.replace(/十([一二三四五六七八九])/g, (_, b) =>
-    String(10 + parseInt(digitMap[b])));
-  result = result.replace(/十/g, '10');
-  // 单独的个位数字
-  for (const [cn, num] of Object.entries(digitMap)) {
-    result = result.replace(new RegExp(cn, 'g'), num);
-  }
+  const digitChars = '零一二两三四五六七八九';
+  // 匹配一段完整的中文数字序列（可含千/百/十/个位），一次性替换为整体数值，
+  // 避免"三百"被拆成"3百"、"一百二"被拆成"12"等问题。
+  const segmentRe = new RegExp(`[${digitChars}十百千]+`, 'g');
+  let result = text.replace(segmentRe, (seg) => {
+    // 段中含 十/百/千 时整段按数值解析（"三百二十" → 320）；
+    // 段中只有个位字符时按位替换（"一二三" 之类识别为逐位读法，避免被误解为 3）。
+    if (/[十百千]/.test(seg)) {
+      const parsed = parseChineseSegment(seg, digitMap);
+      return parsed === null ? seg : String(parsed);
+    }
+    let per = '';
+    for (const ch of seg) per += String(digitMap[ch] ?? ch);
+    return per;
+  });
   return result;
+}
+
+/**
+ * 解析一段纯中文数字（如 "三百二十"、"一千零五"）为整数；无法解析返回 null。
+ */
+function parseChineseSegment(seg: string, digitMap: Record<string, number>): number | null {
+  let total = 0;
+  let section = 0;   // 千百十以内的累计
+  let current = 0;   // 当前位的数字
+  let hasUnit = false; // 段内是否出现过 十/百/千 单位
+  for (const ch of seg) {
+    if (ch in digitMap) {
+      current = digitMap[ch];
+    } else if (ch === '十') {
+      section += (current === 0 ? 1 : current) * 10;
+      current = 0;
+      hasUnit = true;
+    } else if (ch === '百') {
+      if (current === 0) return null;
+      section += current * 100;
+      current = 0;
+      hasUnit = true;
+    } else if (ch === '千') {
+      if (current === 0) return null;
+      section += current * 1000;
+      current = 0;
+      hasUnit = true;
+    } else {
+      return null;
+    }
+  }
+  total = section + current;
+  if (total === 0 && !hasUnit) return null;
+  return total;
 }
 
 /**
@@ -187,6 +224,19 @@ export function parseTimeDuration(text: string): number {
 export function parseSongsCount(text: string): number {
   const normalized = chineseToNumber(text);
   const m = normalized.match(/(\d+)\s*首/);
+  if (m) return parseInt(m[1], 10);
+  return 0;
+}
+
+/**
+ * 从语音文本中解析"第 N 首"里的序号（1 起）。
+ * 支持："第 300 首"、"第五十首"、"跳到第一百二十"，仅在文本包含"第"锚点时命中。
+ * 与 parseSongsCount 区分语义：本函数用于跳播位置，后者用于"再听 N 首后停"。
+ * @returns 序号（>=1）；未识别返回 0
+ */
+export function parseSongIndex(text: string): number {
+  const normalized = chineseToNumber(text);
+  const m = normalized.match(/第\s*(\d+)/);
   if (m) return parseInt(m[1], 10);
   return 0;
 }

@@ -177,6 +177,7 @@ function openGroup(group?: DeviceGroup) { groupEditor.value = true; editGroupId.
 function closeGroup() { groupEditor.value = false; }
 async function saveCurrentGroup() { if (!groupName.value.trim() || selectedMembers.value.length < 2) { notify('请输入分组名称并至少选择两台设备', 'warning'); return; } const members: DeviceMember[] = selectedMembers.value.map((value) => { const [account_id, device_id] = value.split(':'); return { account_id, device_id }; }); try { await saveGroup({ id: editGroupId.value || undefined, name: groupName.value.trim(), members }); closeGroup(); } catch (error) { notify(messageOf(error), 'error'); } }
 async function removeGroup(id: string) { if ((await confirmAction('删除设备分组', '删除后成员会恢复为独立设备播放。', '删除', true)).confirmed) { try { await deleteGroup(id); } catch (error) { notify(messageOf(error), 'error'); } } }
+
 // 用户账号下所有设备去重后的型号（hardware 优先）。设置项以设备实际存在的型号为主，
 // 未在设备列表中出现的默认清单项以徽章形式提示。
 interface MusicApiModelRow { hardware: string; deviceName: string; inDefaults: boolean; }
@@ -212,7 +213,7 @@ async function toggleMusicApi(hardware: string, enabled: boolean): Promise<void>
   if (enabled) {
     current.delete(hardware);
   } else if (defaults.includes(hardware)) {
-    // 默认启用的型号才需要显式禁用；不在默认里的型号本就不走 Music API。
+    // 默认启用的型号才需要显式禁用；不在默认里的型号本就不走 Music API，不用记录。
     current.add(hardware);
   }
   await saveConfig({ music_api_model_disabled: Array.from(current) });
@@ -254,10 +255,17 @@ async function toggleMusicApi(hardware: string, enabled: boolean): Promise<void>
       <label class="field-label">按型号选择播放方式</label>
       <p v-if="!musicApiModelRows.length" class="field-help">尚未识别到任何设备型号，登录并开启设备管理后会出现在这里。</p>
       <div v-for="row in musicApiModelRows" :key="row.hardware" class="device-check-row">
-        <SlCheckbox :model-value="isMusicApiEnabled(row.hardware)" :disabled="!row.inDefaults" @update:model-value="(value) => toggleMusicApi(row.hardware, value)" />
-        <div class="device-check-copy"><strong>{{ row.hardware }}</strong><small>{{ row.deviceName }}<template v-if="!row.inDefaults"> · 该型号默认不走 Music API</template></small></div>
+        <SlCheckbox :model-value="isMusicApiEnabled(row.hardware)" :disabled="!row.inDefaults" :aria-label="`使用 Music API 播放 ${row.hardware}`" @update:model-value="toggleMusicApi(row.hardware, $event)" />
+        <div class="device-check-copy">
+          <strong>{{ row.hardware }}</strong>
+          <small>{{ row.deviceName }}{{ row.inDefaults ? ' · 默认使用 Music API' : ' · 默认使用直链播放' }}</small>
+        </div>
+        <span v-if="row.inDefaults" class="chip chip-success">默认</span>
       </div>
-      <p v-if="defaultsMissingFromDevices.length" class="field-help">默认清单中还有未接入的设备型号：{{ defaultsMissingFromDevices.join('、') }}。</p>
+      <p v-if="defaultsMissingFromDevices.length" class="field-help">
+        默认清单中未在当前账号出现的型号：
+        <span v-for="hw in defaultsMissingFromDevices" :key="hw" class="chip" style="margin-left:6px">{{ hw }}</span>
+      </p>
     </div>
     <SettingRow title="播放时保持指示灯" subtitle="关闭后播放时音箱指示灯不亮，适合夜间使用"><SlSwitch v-model="state.config.indicator_light_enabled" aria-label="播放时保持指示灯" @update:model-value="saveConfig({ indicator_light_enabled: $event })" /></SettingRow>
   </SectionCard>

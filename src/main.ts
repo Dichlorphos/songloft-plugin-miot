@@ -139,7 +139,7 @@ async function onInit(): Promise<void> {
     await warnIfServerHostStale(pluginConfig.server_host);
   }
 
-  // 同步轮询调试日志开关到 debug 模块缓存（热路径同步读取，不能每 tick await 配置）
+  // 同步调试日志开关到 debug 模块缓存（热路径同步读取，不能每 tick await 配置）
   setDebugLog(pluginConfig.debug_log_enabled ?? false);
 
   conversationMonitor = new ConversationMonitor(accountManager, configManager);
@@ -147,7 +147,7 @@ async function onInit(): Promise<void> {
   initConversationStream(conversationMonitor);
   voiceEngine = new VoiceEngine(configManager, accountManager, minaService, playlistManagerMap, indexingManager, new AIAnalyzer(), memoryService, groupCoordinator);
 
-  const executor = new TaskExecutor(configManager, accountManager, minaService, playlistManagerMap, indexingManager, conversationMonitor, groupCoordinator);
+  const executor = new TaskExecutor(configManager, accountManager, minaService, playlistManagerMap, indexingManager, conversationMonitor, groupCoordinator, voiceEngine);
   scheduler = new Scheduler(configManager, executor);
 
   // 如果配置中没有语音口令配置，写入默认配置；已有配置时补充新增的默认口令类型

@@ -140,8 +140,8 @@ export class ConversationMonitor {
       for (const dm of this.devices.values()) {
         dm.isRunning = true;
       }
-      // devices=0 是典型踩坑：开关打开但没在设备设置勾选任何音箱。
-      // 对话监听只轮询 managed 设备，但口令测试走直连，会表现为「测试正常、监听无声」。
+      // devices=0 是典型的踩坑现场（开关打开但没在设备设置勾选任何音箱），INFO 混在启动噪声里
+      // 用户导日志时几乎注意不到，升为 WARN 并给出下一步（songloft-org/songloft-plugin-miot#104）
       if (this.devices.size === 0) {
         songloft.log.warn(`[ConversationMonitor] Started with 0 managed devices — 请到"设备设置"勾选要监听的音箱，否则对话监听不会工作 (callbacks=${this.callbacks.size} interval=${intervalSec}s)`);
       } else {

@@ -192,7 +192,7 @@ export interface PluginConfig {
   play_announcement_delay: number;
   play_announcement_scope: 'voice' | 'all';
   conversation_poll_interval: number;
-  debug_log_enabled?: boolean; // 会话轮询调试日志开关，默认 false（稳态轮询不打冗余日志）
+  debug_log_enabled?: boolean; // 调试日志开关，默认 false（覆盖会话轮询与音箱推流诊断日志）
   smart_resume_timeout: number;
   max_song_index: number;
   ai_config: AIConfig;
@@ -257,7 +257,8 @@ export interface TaskParams {
   song_id?: number;        // 用于 play_playlist_from 按 ID 指定起始歌曲（前端选择器产出）
   start_position?: StartPosition; // 用于 play_playlist 指定起始位置,缺省=first
   play_mode?: string;      // 空串表示「跟随上次」(沿用设备持久化的播放模式)
-  volume?: number;
+  volume?: number;         // 对 set_volume：目标音量；对 play_playlist(_from)：播放前预设音量，缺省=不改
+  stop_after_minutes?: number; // 仅 play_playlist(_from) 生效：播放成功后 N 分钟自动停止；缺省=不启用
 }
 
 /** 任务执行日志 */
@@ -318,6 +319,8 @@ export interface AIAnalysisResult {
     duration?: number;
     /** sleep_timer：定时停止的曲目数 */
     songs_count?: number;
+    /** play_index：跳到当前歌单的第 N 首（1 起） */
+    index?: number;
   };
   /** AI 置信度 */
   confidence: 'high' | 'medium' | 'low';

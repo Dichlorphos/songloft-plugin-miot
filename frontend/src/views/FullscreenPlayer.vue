@@ -94,9 +94,9 @@ async function loadSongDetails(): Promise<void> {
   isFavorite.value = favoriteResult.status === 'fulfilled' && favoriteResult.value.is_favorited;
 }
 
-// 全屏播放器的「删除当前歌曲」入口。临时歌单（id<0）不落库，按钮不可用。
-// 要删的是当前正播那首，取自 player.playlist_id / player.current_song，
-// 而不是当前选中的歌单列表（用户可能开着另一个歌单在看）。
+// 全屏播放器里的"删除当前歌曲"入口。临时歌单（id<0，语音"播放歌手X"生成的一次性队列）
+// 不落库，按下删除会没意义——这时按钮不可用。要删的是"当前正播那首"，取自 player.current_song
+// 而不是 selectedPlaylistId 对应的列表（用户可能开着另一个歌单在看）。
 const currentPlaylistId = computed(() => {
   const id = Number(state.player.playlist_id);
   return Number.isFinite(id) ? id : 0;
@@ -115,7 +115,8 @@ async function removeCurrentSong(): Promise<void> {
   );
   if (!result.confirmed) return;
   try {
-    // 这里直接调后端并接手错误提示：全屏播放器正播的歌单不一定是当前选中的那份。
+    // removeSongFromPlaylist 读的是 selectedPlaylistId，而全屏播放器里正播的那份
+    // 不一定是当前选中的歌单；这里直接调后端并接手错误提示。
     await post('/player/song/remove', {
       playlist_id: playlistId,
       song_id: song.id,
@@ -123,6 +124,7 @@ async function removeCurrentSong(): Promise<void> {
       account_id: state.currentAccountId,
       device_id: state.currentDeviceId,
     });
+    // 若删的正是当前所选歌单里那首，也要同步筛掉，否则列表还残留一条已消失的歌。
     if (String(playlistId) === state.selectedPlaylistId) {
       state.songs = state.songs.filter((item) => item.id !== song.id);
     }
@@ -131,6 +133,7 @@ async function removeCurrentSong(): Promise<void> {
     notify(messageOf(error), 'error');
   }
 }
+
 async function toggleFavorite(): Promise<void> {
   const id = state.player.current_song?.id;
   if (!id || favoriteBusy.value) return;

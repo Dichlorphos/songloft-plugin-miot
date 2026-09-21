@@ -172,8 +172,8 @@ export class ConfigManager {
       this.configCache = this.load<Partial<PluginConfig>>(STORAGE_KEY_CONFIG, {});
     }
     const stored = await this.configCache;
-    // 旧字段 conversation_poll_debug 更名为 debug_log_enabled：只在新字段缺席时迁移旧值，
-    // 随后清空旧字段并落盘，防止后续再触发迁移。
+    // 旧字段 conversation_poll_debug 更名为 debug_log_enabled。只在新字段缺席时
+    // 迁移旧值，确保只走一次；随后清空旧字段并落盘，防止后续再看到残留触发迁移。
     const legacyPollDebug = (stored as any).conversation_poll_debug;
     let migratedDebugLog = false;
     if (stored.debug_log_enabled === undefined && typeof legacyPollDebug === 'boolean') {
@@ -568,12 +568,22 @@ export class ConfigManager {
       return getDefaultVoiceCommands();
     }
 
-    const migrated = migrateLegacyStopCommand(commands);
+    // 老用户升级后补齐新增的默认口令（如 play_index、sleep_timer 系列），
+    // 用 type+param 组合去重：set_play_mode 一个 type 对应多个默认条目（random/single/…），
+    // 必须按 param 区分才不会把兄弟条目一起判为"已存在"。仅在读取时合并，不写回存储，
+    // 用户下次在设置页保存时才落盘。
+    const defaults = getDefaultVoiceCommands();
+    const seen = new Set(commands.map(c => `${c.type}::${c.param ?? ''}`));
+    const missing = defaults.filter(d => !seen.has(`${d.type}::${d.param ?? ''}`));
+    const merged = missing.length > 0 ? [...commands, ...missing] : commands;
+    // 早期默认口令把「暂停/pause」并入了 stop：只迁移仍等于旧默认 stop 项的那份配置，
+    // 用户自定义过的口令一律不动。迁移结果需落盘，避免每次读取重复处理。
+    const migrated = migrateLegacyStopCommand(merged);
     if (migrated) {
       await this.save(STORAGE_KEY_VOICE_COMMANDS, migrated);
       return migrated;
     }
-    return commands;
+    return merged;
   }
 
   /** 保存语音口令配置 */

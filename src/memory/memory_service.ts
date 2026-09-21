@@ -657,7 +657,8 @@ export class MemoryService {
   }
 
   private enforceLimit(records: Map<string, MemoryRecord>): number {
-    // 手动别名由用户显式维护：不计入上限，也不参与淘汰，避免自动池满时被挤掉。
+    // 手动别名（manualAlias）是用户显式维护的数据：不计入上限，也不参与淘汰。
+    // 上限只约束自动学习记录，避免自动池满时把最旧的手动别名挤掉。
     const auto = Array.from(records.values()).filter(record => record.manualAlias !== true);
     const overflow = auto.length - this.maxRecords;
     if (overflow <= 0) return 0;

@@ -77,7 +77,7 @@ export interface ConfirmState {
   dangerous: boolean;
   /**
    * 可选复选框：出现在确认对话框正文下方，勾选状态随 resolve 一起回传。
-   * 用于「是/否 + 要不要顺带做另一件事」的确认场景（如删歌时是否清曲库）。
+   * 用于"删歌"这种"是/否" + "要不要顺带做另一件事"的确认场景。
    */
   checkbox?: { label: string; checked: boolean };
   resolve?: (value: { confirmed: boolean; checked: boolean }) => void;
@@ -226,10 +226,12 @@ export function resolveConfirm(value: boolean): void {
 }
 
 /**
- * 从歌单删除一首歌。可选 `fromLibrary=true` 时同时从曲库永久删除。
+ * 从歌单删除一首歌。可选 `fromLibrary=true` 时同时从曲库永久删除
+ * （封面 + 缓存都清）。
  *
  * 音箱正播那首被删时，后端会先切下一首再摘除；前端只负责刷新本地歌曲列表和
- * 播放状态（不重新拉整份进度：切换靠 status WS 推）。
+ * 播放状态（不重新拉整份进度：切换靠 status WS 推）。收藏歌单删除后，
+ * fullscreen 的"已收藏"图标由下一次 `loadSongDetails` 校准。
  */
 export async function removeSongFromPlaylist(song: Song, opts: { fromLibrary?: boolean } = {}): Promise<void> {
   if (!state.selectedPlaylistId) throw new Error('请先选择歌单');

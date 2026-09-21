@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppBar from './AppBar.vue';
 import DevicePicker from './DevicePicker.vue';
+import MiotScrollbar from './MiotScrollbar.vue';
 import PlayerBar from './PlayerBar.vue';
 import SongRow from './SongRow.vue';
 import SlButton from '../ui/SlButton.vue';
@@ -58,6 +59,8 @@ const rowHeight = ref(64);
 const listHeight = ref(0);
 /** 窗口起点的「意向值」，真正生效的是下面 clamp 过的 windowStart。 */
 const rawWindowStart = ref(0);
+/** 供自定义滚动条读取当前滚动位置：由轮询与 @scroll 同步，不依赖组件相互读写 DOM。 */
+const currentScrollTop = ref(0);
 
 const totalSongs = computed(() => visibleSongs.value.length);
 const windowRows = computed(() => {
@@ -90,8 +93,10 @@ function startWindowPoll(): void {
   if (windowPollTimer) return;
   windowPollTimer = setInterval(() => {
     if (!mounted || !listRef.value) return;
+    const top = listRef.value.scrollTop();
+    currentScrollTop.value = top;
     if (Date.now() < locateGuardUntilMs) return;
-    syncWindowToScroll(listRef.value.scrollTop());
+    syncWindowToScroll(top);
   }, WINDOW_POLL_MS);
 }
 
@@ -143,14 +148,39 @@ function syncWindowToScroll(top: number): void {
 function onListScroll(event: Event): void {
   const target = event.currentTarget as HTMLElement | null;
   const top = target && typeof target.scrollTop === 'number' ? target.scrollTop : (listRef.value?.scrollTop() ?? 0);
+  currentScrollTop.value = top;
   syncWindowToScroll(top);
 }
 
 function resetSongWindow(): void {
   rawWindowStart.value = 0;
+  currentScrollTop.value = 0;
   // 回到顶部这段时间同样不能让轮询按旧 scrollTop 反推窗口。
   locateGuardUntilMs = Date.now() + 400;
   void nextTick(() => listRef.value?.setScrollTop(0));
+}
+
+/**
+ * 拖动/点按自定义滚动条时的落点。fraction 是 [0, 1] 的目标滚动位置比例。
+ *
+ * 与 scrollToIndex 的路子一致：先按目标位置推进窗口再写 scrollTop，否则 WebF 的
+ * ListView.builder 会因目标区域尚未布局把 maxScrollExtent 钳掉，写入被截断。这里
+ * 还额外设置 locateGuardUntilMs，防止 120ms 轮询把窗口拽回旧位置。
+ */
+function seekToFraction(fraction: number): void {
+  if (!mounted) return;
+  const list = listRef.value;
+  if (!list) return;
+  const total = totalSongs.value;
+  if (total <= 0 || rowHeight.value <= 0) return;
+  const clamped = Math.max(0, Math.min(1, fraction));
+  const totalHeight = total * rowHeight.value;
+  const maxTop = Math.max(0, totalHeight - listHeight.value);
+  const target = maxTop * clamped;
+  rawWindowStart.value = Math.max(0, Math.floor(target / rowHeight.value) - WINDOW_BUFFER_ROWS);
+  locateGuardUntilMs = Date.now() + 400;
+  currentScrollTop.value = target;
+  void nextTick(() => list.setScrollTop(target));
 }
 
 function measureListHeight(attempt = 0): void {
@@ -198,7 +228,8 @@ function openDevicePicker() {
 async function play(song: Song, index: number) {
   try { await playSong(song, index); } catch (error) { /* store already presents the error */ notifyLocal(error); }
 }
-// 临时歌单（id<0，语音「播放歌手X」生成的一次性队列）不落库，不允许删除。
+// 临时歌单（id<0，语音"播放歌手X"生成的一次性队列）不允许"删除"：它本来就不落库，
+// 用户想要的语义只对真实歌单成立。songRemovable 也据此隐藏 SongRow 的按钮。
 const songRemovable = computed(() => {
   const id = Number(state.selectedPlaylistId);
   return Number.isFinite(id) && id > 0;
@@ -326,13 +357,26 @@ onUnmounted(() => {
     </div>
 
     <!-- 虚拟列表：两个占位条常驻（高度为 0 时也不摘掉），保持列表子节点结构稳定，
-         避免窗口滑动时原生 ListView 的子节点索引整体错位。 -->
-    <SlListView v-if="state.selectedPlaylistId && !state.songsLoading && !state.songsError" ref="listRef" aria-label="歌曲列表" @scroll="onListScroll">
-      <div class="song-list-spacer" :style="{ height: `${leadSpacerHeight}px` }"></div>
-      <SongRow v-for="(song, index) in renderedSongs" :key="song.id" :song="song" :index="windowStart + index" :removable="songRemovable" @play="play" @remove="removeSong" />
-      <div class="song-list-spacer" :style="{ height: `${tailSpacerHeight}px` }"></div>
-      <div v-if="totalSongs === 0" class="song-list-empty">没有匹配的歌曲</div>
-    </SlListView>
+         避免窗口滑动时原生 ListView 的子节点索引整体错位。
+         外层 miot-scrollbar-shell 是 position: relative，让自定义可拖动滚动条能覆盖在右侧。 -->
+    <div v-if="state.selectedPlaylistId && !state.songsLoading && !state.songsError" class="miot-scrollbar-shell">
+      <SlListView ref="listRef" aria-label="歌曲列表" @scroll="onListScroll">
+        <div class="song-list-spacer" :style="{ height: `${leadSpacerHeight}px` }"></div>
+        <SongRow v-for="(song, index) in renderedSongs" :key="song.id" :song="song" :index="windowStart + index" :removable="songRemovable" @play="play" @remove="removeSong" />
+        <div class="song-list-spacer" :style="{ height: `${tailSpacerHeight}px` }"></div>
+        <div v-if="totalSongs === 0" class="song-list-empty">没有匹配的歌曲</div>
+      </SlListView>
+      <!-- 20 首以内没必要出滚动条，短列表用原生滚动更自然 -->
+      <MiotScrollbar
+        :total-items="totalSongs"
+        :row-height="rowHeight"
+        :viewport-height="listHeight"
+        :scroll-top="currentScrollTop"
+        :enabled="totalSongs > 20"
+        :label-builder="(i, t) => `${i} / ${t}`"
+        @seek="seekToFraction"
+      />
+    </div>
     <div v-else-if="state.songsLoading" class="song-list-empty"><span class="loading-spinner"></span><span>正在加载歌曲</span></div>
     <div v-else-if="state.songsError" class="song-list-empty"><span>{{ state.songsError }}</span><SlButton variant="text" label="重试" @click="selectPlaylist(state.selectedPlaylistId)" /></div>
     <div v-else class="song-list-empty"><div><SlIcon name="queue_music" :size="34" /><p>选择歌单后开始播放</p></div></div>

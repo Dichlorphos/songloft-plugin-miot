@@ -18,7 +18,7 @@ import { getSwitchCoordinator } from '../playback_sync';
 import { callHostAPI, getHostAPIBaseUrl } from '../utils/http';
 import { findFavoritesPlaylist } from '../utils/favorites';
 import { MemoryService } from '../memory';
-import { SleepTimer, parseTimeDuration, parseSongsCount, detectSleepTimerMode, formatRemaining } from '../sleep_timer';
+import { SleepTimer, parseTimeDuration, parseSongsCount, parseSongIndex, detectSleepTimerMode, formatRemaining } from '../sleep_timer';
 import type { PlaylistManager } from '../player/manager';
 import type { SongLocation, ArtistSongLocation } from '../indexing/manager';
 import type { MemoryRecord } from '../memory';
@@ -112,6 +112,7 @@ const COMMAND_PRIORITY: Record<string, number> = {
   'play_artist': 1,
   'play_song': 1,
   'play_playlist': 2,
+  'play_index': 2,
   'set_play_mode': 3,
   'set_volume': 4,
   'favorite': 5,
@@ -136,7 +137,7 @@ const INDEX_READY_WAIT_MS = 5000;
 /** 本地独立歌曲 URL 健康检查超时（ms），利用 TTS 播报窗口期异步验证，不增加用户感知延迟。 */
 const URL_HEALTH_CHECK_TIMEOUT_MS = 3000;
 
-const FIXED_CONTROL_COMMAND_TYPES = new Set(['set_play_mode', 'set_volume', 'favorite', 'next', 'previous', 'pause', 'stop', 'sleep_timer', 'cancel_sleep_timer', 'query_sleep_timer']);
+const FIXED_CONTROL_COMMAND_TYPES = new Set(['set_play_mode', 'set_volume', 'favorite', 'next', 'previous', 'pause', 'stop', 'sleep_timer', 'cancel_sleep_timer', 'query_sleep_timer', 'play_index']);
 const SEARCH_COMMAND_TYPES = new Set(['play_song', 'play_playlist', 'play_artist']);
 const BUILTIN_PAUSE_KEYWORDS = ['暂停播放', '暂停音乐', '暂停', 'pause'];
 const BUILTIN_STOP_KEYWORDS = ['停止播放', '停一下', 'stop', '停止'];
@@ -842,6 +843,9 @@ export class VoiceEngine {
       case 'play_playlist':
         await this.executePlayPlaylist(result.argument, accountId, deviceId);
         break;
+      case 'play_index':
+        await this.executePlayIndex(query || `${result.keyword}${result.argument}`, accountId, deviceId);
+        break;
       case 'play_song':
         playedSong = await this.executePlaySong(result.argument, accountId, deviceId);
         break;
@@ -931,6 +935,15 @@ export class VoiceEngine {
           return null;
         }
         await this.executePlayPlaylist(playlist, accountId, deviceId);
+        break;
+      }
+      case 'play_index': {
+        const idx = result.params.index;
+        if (!idx || idx <= 0) {
+          songloft.log.warn('[VoiceEngine] [AI] play_index: invalid index');
+          return null;
+        }
+        await this.executePlayIndexNumber(idx, accountId, deviceId);
         break;
       }
       case 'set_play_mode': {
@@ -1093,6 +1106,48 @@ export class VoiceEngine {
     }
 
     songloft.log.error(`[VoiceEngine] Play playlist failed: ${matchedPlaylist.name}`);
+  }
+
+  /**
+   * 执行"播放第 N 首"：从原始 query 中解析序号后跳到当前歌单/临时列表的对应位置。
+   * 序号从 1 起；无正在播放的歌单或越界则 TTS 提示，不改变播放状态。
+   */
+  private async executePlayIndex(query: string, accountId: string, deviceId: string): Promise<void> {
+    const target = parseSongIndex(query);
+    if (target <= 0) {
+      songloft.log.warn(`[VoiceEngine] play_index: 无法识别序号 query="${query}"`);
+      await this.minaService.textToSpeech(accountId, deviceId, '抱歉，无法识别序号');
+      return;
+    }
+    await this.executePlayIndexNumber(target, accountId, deviceId);
+  }
+
+  /**
+   * 按 1 起序号跳到当前歌单/临时列表的第 N 首。
+   * 走既有 pm 而不 getOrCreate：跳位只对已在播的歌单有意义，从零态里创建一个空 pm 不合理。
+   */
+  private async executePlayIndexNumber(target: number, accountId: string, deviceId: string): Promise<void> {
+    const pm = this.playlistManagerMap.get(accountId, deviceId);
+    if (!pm || !pm.hasPlaylist()) {
+      songloft.log.warn('[VoiceEngine] play_index: 当前没有正在播放的歌单');
+      await this.minaService.textToSpeech(accountId, deviceId, '当前没有正在播放的歌单，无法跳转');
+      return;
+    }
+    const total = pm.getTotalSongs();
+    if (target > total) {
+      songloft.log.warn(`[VoiceEngine] play_index: 越界 target=${target} total=${total}`);
+      await this.minaService.textToSpeech(accountId, deviceId, `歌单只有${total}首`);
+      return;
+    }
+    this.cancelPendingResume();
+    await this.interruptBroadcast(accountId, deviceId);
+    const ok = await pm.playAtIndex(target - 1);
+    if (ok) {
+      songloft.log.info(`[VoiceEngine] play_index success: index=${target} total=${total}`);
+    } else {
+      songloft.log.error(`[VoiceEngine] play_index failed: index=${target}`);
+      await this.minaService.textToSpeech(accountId, deviceId, '跳转失败');
+    }
   }
 
   /**

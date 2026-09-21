@@ -65,11 +65,11 @@ Relevant logs:
 The settings page persists these fields through the existing `/config` API and `songloft.storage` configuration key:
 
 - `voice_memory_enabled`: defaults to `true`.
-- `voice_memory_max_records`: defaults to `100`, clamped to `10..1000`.
+- `voice_memory_max_records`: defaults to `100`, clamped to `10..5000`. This limit applies only to auto-learned records; manual aliases (`manualAlias: true`) are exempt from the cap and are never auto-evicted.
 
 Turning memory off skips lookup and new writes without deleting saved records. The settings page also lists records and supports single-record deletion and confirmed clearing through the `/memory` routes.
 
-When the configured limit is exceeded, the least recently used records are evicted first. Use the settings-page switch for quick rollback; the existing rule and AI fallback flow remains active.
+When the configured limit is exceeded, the least recently used auto-learned records are evicted first; manual aliases are preserved. Use the settings-page switch for quick rollback; the existing rule and AI fallback flow remains active.
 
 ## Current Diagnostic Limit
 

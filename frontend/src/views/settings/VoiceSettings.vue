@@ -46,6 +46,7 @@ const commandLabels: Record<string, string> = {
   play_playlist: '播放歌单',
   play_artist: '播放歌手',
   play_song: '播放歌曲',
+  play_index: '播放指定序号',
   set_play_mode: '播放模式',
   set_volume: '音量控制',
   favorite: '收藏歌曲',
@@ -61,6 +62,7 @@ const commandIcons: Record<string, string> = {
   play_playlist: 'queue_music',
   play_artist: 'artist',
   play_song: 'music_note',
+  play_index: 'format_list_numbered',
   set_play_mode: 'repeat',
   set_volume: 'volume_up',
   favorite: 'favorite',
@@ -139,12 +141,13 @@ const expandedMemory = ref<string | null>(null);
 const aiModelsList = ref<{ id: string; ownedBy?: string }[]>([]);
 const aiModelLoading = ref(false);
 const aiModelError = ref('');
+// 连接状态与延迟：idle=未配置/未检测，loading=检测中，ok=已连接，error=失败
 const aiConnState = ref<'idle' | 'loading' | 'ok' | 'error'>('idle');
 const aiConnLatency = ref<number | null>(null);
 let conversationSocket: WebSocket | null = null;
 let conversationPoll: ReturnType<typeof setInterval> | null = null;
 
-// --- AI 预设服务商（国内主流 OpenAI 兼容服务） ---
+// --- AI 预设服务商（国内免费/便宜优先） ---
 const aiPresetOptions = [
   { value: 'custom', label: '自定义（OpenAI 兼容）', searchText: '自定义 openai 兼容' },
   ...AI_PRESET_PROVIDERS.map((p) => ({ value: p.id, label: p.name, searchText: p.name })),
@@ -152,18 +155,18 @@ const aiPresetOptions = [
 const selectedAiPreset = ref('custom');
 const selectedAiPresetObj = computed(() => AI_PRESET_PROVIDERS.find((p) => p.id === selectedAiPreset.value) || null);
 
-/** 选中预设即自动填 API 地址与默认模型（不碰 API Key）；选「自定义」保留手填。 */
+/** 选中预设即自动填 API 地址与默认模型（不碰 API Key）；选「自定义」则展示地址输入框供手填 */
 async function applyAiPreset(id: string): Promise<void> {
   selectedAiPreset.value = id;
   if (id === 'custom') {
     notify('已选择自定义，请填写 API 地址与模型', 'success');
-    return;
+    return; // 自定义：保留用户已填的 url/model，仅展示输入框
   }
   const p = AI_PRESET_PROVIDERS.find((x) => x.id === id);
   if (!p) return;
   state.config.ai_config.api_url = p.baseUrl;
   if (p.defaultModel) state.config.ai_config.model = p.defaultModel;
-  modelCustomActive.value = false;
+  modelCustomActive.value = false; // 预设自带模型即视为非自定义
   await saveConfig({ ai_config: state.config.ai_config });
   notify(`已套用预设「${p.name}」，请填写 API Key`, 'success');
 }
@@ -234,15 +237,16 @@ syncSourceDrafts();
 onMounted(async () => {
   await Promise.all([loadVoiceData(), loadSearchProviders()]);
   syncSourceDrafts();
-  // 静默预检模型列表：填充下拉并测量连接延迟，不弹通知。
+  // 静默预拉模型列表填充下拉：仅联网填充，不弹通知（提示交给用户主动点「刷新」）
   if (state.config.ai_config.api_url && state.config.ai_config.api_key) {
     void refreshAiModels(true).then(() => {
+      // 同步自定义模式：当前模型名不在列表里（且非空）→ 视为手填自定义
       const cur = state.config.ai_config.model || '';
       modelCustomActive.value = !!cur && !aiModelsList.value.some((m) => m.id === cur);
     });
   }
   if (state.config.conversation_monitor_enabled) connectConversation();
-  // 反查当前 api_url 命中的预设：命中则高亮该预设（隐藏地址框），无匹配则归为「自定义」。
+  // 反查当前 api_url 命中的预设：命中则高亮该预设（隐藏地址框），无匹配则归为「自定义」（显示地址框）
   const cur = (state.config.ai_config.api_url || '').trim().replace(/\/+$/, '');
   const hit = AI_PRESET_PROVIDERS.find((p) => p.baseUrl.replace(/\/+$/, '') === cur);
   selectedAiPreset.value = hit ? hit.id : 'custom';
@@ -530,10 +534,9 @@ async function testAI(): Promise<void> {
   }
 }
 
-/** 拉取可用模型列表（同时预检 API 连通性） */
 /**
- * 拉取模型列表并测量连通性与延迟。
- * @param silent true=静默预检（进页面自动执行，不弹通知）；false=用户主动刷新（弹通知）
+ * 拉取可用模型列表，同时测量连通性与延迟（配置页「连接状态/延迟」的数据源）。
+ * @param silent true=静默预检（进页面自动执行，不弹通知）；false=用户主动点刷新（弹通知）
  */
 async function refreshAiModels(silent = false): Promise<void> {
   if (!state.config.ai_config.api_url || !state.config.ai_config.api_key) {
@@ -574,13 +577,13 @@ const aiConnText = computed(() => {
     case 'loading': return '连接检测中…';
     case 'ok': return `已连接 · ${aiConnLatency.value} ms`;
     case 'error': return `连接失败：${aiModelError.value}`;
-    default: return configured ? '尚未检测' : '未配置 API';
+    default: return configured ? '未检测' : '未配置';
   }
 });
 
 // --- end of model fetching ---
 
-// 模型下拉末尾固定追加「自定义模型名…」，选中才展开手填框。
+// 模型下拉末尾固定追加「自定义模型名…」，选中才展开手填框（避免常驻冗余输入框）
 const AI_MODEL_CUSTOM = '__custom_model__';
 
 const aiModelOptions = computed<SelectOption[]>(() => [
@@ -592,19 +595,21 @@ const aiModelOptions = computed<SelectOption[]>(() => [
   { value: AI_MODEL_CUSTOM, label: '自定义模型名…', searchText: '自定义' },
 ]);
 
-// 当前是否处于「自定义模型名」模式；下拉回显值在自定义模式下映射为哨兵项。
+// 当前是否处于「自定义模型名」模式：下拉选了自定义项即展开输入框
 const modelCustomActive = ref(false);
+// 下拉回显值：自定义模式下映射为哨兵项，否则为实际模型名
 const aiModelSelectValue = computed(() =>
   modelCustomActive.value ? AI_MODEL_CUSTOM : (state.config.ai_config.model || ''),
 );
 
 /**
- * 模型下拉选择处理。必须放在 script 方法里：模板内联表达式里 ref 会被自动解包，
- * 直接写 modelCustomActive.value = ... 会触发 WebF 的 readonly 赋值报错。
+ * 模型下拉选择处理。
+ * 注意：必须放在 script 方法里调用（模板内联表达式会把 ref 自动解包成原始值，
+ * 直接写 `modelCustomActive.value = ...` 会触发 WebF 的 readonly 赋值报错）。
  */
 function onModelSelect(v: string): void {
   if (v === AI_MODEL_CUSTOM) {
-    modelCustomActive.value = true;
+    modelCustomActive.value = true; // 选「自定义模型名…」：仅展开输入框，不改 model
     return;
   }
   modelCustomActive.value = false;
@@ -723,7 +728,8 @@ async function deleteMemoryRecord(id?: string): Promise<void> {
       <div v-if="state.config.conversation_monitor_enabled" class="status-panel status-panel-inset">
         <div class="status-chips"><span class="chip chip-success">{{ conversationSocket ? 'WebSocket 已连接' : '轮询回落中' }}</span><span class="chip" :class="managedDevices.length ? 'chip-success' : 'chip-warning'">{{ managedDevices.length }} 台受管理设备</span><span class="chip">{{ state.conversationMessages.length }} 条最近记录</span></div>
       </div>
-      <!-- 「开关打开但没勾任何设备」最容易踩坑：口令测试走直连正常，但对话监听只轮询 managed 设备，未勾选就永远拿不到消息。 -->
+      <!-- 「开关打开但没勾任何设备」是最容易踩的坑：口令测试正常但对话监听永远拿不到消息
+           （songloft-org/songloft-plugin-miot#104）——只轮询 managed 设备，未勾选就整台都不进池 -->
       <div v-if="state.config.conversation_monitor_enabled && !managedDevices.length" class="dependency-hint"><SlIcon name="warning" :size="18" /><span>尚未勾选任何受管理设备，对话监听不会工作。请到"设备设置"勾选要监听的音箱。</span></div>
       <div class="field-actions"><SlButton variant="text" label="刷新记录" icon="refresh" @click="refreshConversation" /></div>
     </div>
@@ -899,7 +905,8 @@ async function deleteMemoryRecord(id?: string): Promise<void> {
       <div class="field-grid">
         <div class="field">
           <label class="field-label">模型</label>
-          <!-- 复用 .inline-fields 而不是手写 display:flex：WebF 下子项没有显式 flex 尺寸就不会收缩，下拉会把「刷新」挤出本列。 -->
+          <!-- 复用 .inline-fields 而不是手写 display:flex：见 style.css .model-row 注释，
+               WebF 下子项没有显式 flex 尺寸就不会收缩，下拉会把「刷新」挤出本列。 -->
           <div class="inline-fields model-row">
             <SlSelect
               :model-value="aiModelSelectValue"
@@ -912,8 +919,10 @@ async function deleteMemoryRecord(id?: string): Promise<void> {
             />
             <SlButton variant="outlined" label="刷新" icon="refresh" :disabled="aiModelLoading || !state.config.ai_config.api_url || !state.config.ai_config.api_key" @click="() => refreshAiModels()" title="调用 /models 预检 API、获取模型列表并测量延迟" />
           </div>
-          <!-- 自定义模型名：仅在下拉选「自定义模型名…」或当前模型不在列表时展开。 -->
+          <!-- 自定义模型名：仅在下拉选「自定义模型名…」或当前模型不在列表时展开（部分服务不支持 /v1/models 或列表缺目标模型） -->
           <template v-if="modelCustomActive">
+            <!-- 不套 auto 宽的裸 div：Flutter 系输入框是 RenderWidget，包一层会被 WebF
+                 量到视口宽（SlButton.vue 顶部注释同源），间距用自身 margin-top。 -->
             <SlInput
               class="model-custom-input"
               :model-value="state.config.ai_config.model || ''"
@@ -931,7 +940,6 @@ async function deleteMemoryRecord(id?: string): Promise<void> {
         <span class="chip" :class="aiConnChipClass">{{ aiConnText }}</span>
       </div>
       <div v-if="aiModelError" class="field-help" style="color:#ef5350;">{{ aiModelError }}</div>
-      <div v-if="aiModelLoading && aiModelsList.length === 0" class="field-help">正在连接 API 获取模型列表...</div>
       <div class="command-test-panel command-test-panel-inset"><strong>AI 分析测试</strong><div class="inline-fields"><SlInput v-model="aiTestQuery" placeholder="输入自然语言口令" @submit="testAI" /><SlButton variant="outlined" label="测试分析" icon="science" :disabled="aiTestBusy" @click="testAI" /></div><pre v-if="aiTestResult" class="result-pre">{{ aiTestResult }}</pre></div>
     </div>
   </SectionCard>

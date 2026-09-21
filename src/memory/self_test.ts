@@ -128,7 +128,7 @@ export async function runMemoryV2SelfTest(): Promise<MemoryV2SelfTestResult> {
   check('v3_alias_delete_rebuilds_index', v3Service.findByQuery('再听一遍晴天') === null);
   await v3Service.deleteEntity('song:id:101');
   check('v3_entity_delete_rebuilds_index', v3Service.count() === 0 && v3Service.getIndexStats().entities === 0);
-  check('v3_max_records_clamped', normalizeMemoryMaxRecords(1000) === 500);
+  check('v3_max_records_clamped', normalizeMemoryMaxRecords(10000) === 5000 && normalizeMemoryMaxRecords(1000) === 1000);
 
   const duplicated = [
     record('later-1', '播放刘若英后来', '后来', '刘若英', 201),

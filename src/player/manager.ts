@@ -84,9 +84,14 @@ const EXTERNAL_RESUME_CONFIRM_COUNT = 2;
  * 音箱把当前这首播完就再没有下一首，表现为「歌单还有歌但播完某首就停」。
  *
  * 与 verifyResumeOrRepush 是对称的两半：那边防「ubus 说成功但没真播上」，
- * 这边防「ubus 说失败但其实已播上」。节奏也对齐（2 次 × 1.2s，最多 ~2.4s）。
+ * 这边防「ubus 说失败但其实已播上」。
+ *
+ * 探测窗口需要覆盖设备端云侧秒级抖动：`play-url` 和 `getPlayState` 走同一云端，
+ * 抖动期两个调用会同时不通，`status<0` 短路会让核实立刻失败（songloft-org/songloft-player#45）。
+ * 因此把 `status<0` 从「立即判失败」放宽为「本轮无信号，继续下一轮」，配合更大的探测次数
+ * 争取云端恢复的那一次响应；总窗口 ~6s，仍远小于用户可感知的静默。
  */
-const PUSH_VERIFY_ATTEMPTS = 2;
+const PUSH_VERIFY_ATTEMPTS = 5;
 const PUSH_VERIFY_DELAY_MS = 1200;
 /**
  * 「刚起播」窗口：核实时设备的流内位置必须还落在流开头，否则不认这次下发已生效。
@@ -134,7 +139,6 @@ const LOOP_DETECT_RESET_THRESHOLD_SEC = 3;
 const LANDING_VERIFY_FIRST_DELAY_MS = 10000;
 const LANDING_VERIFY_RETRY_DELAY_MS = 8000;
 const LANDING_VERIFY_ATTEMPTS = 2;
-
 
 /** 单首跳歌 TTS 文案 */
 const LANDING_FAILURE_TTS_TEXT = '这首歌暂时无法播放，为您切换下一首';
@@ -746,6 +750,33 @@ export class PlaylistManager {
   }
 
   /**
+   * 跳到当前歌单/临时列表的第 index 首（0 起）。
+   * 不重载歌单、不改播放模式，仅移动 currentIndex 并 playCurrent；
+   * 越界或没有歌单时返回 false，由调用方决定给不给 TTS。
+   */
+  async playAtIndex(index: number): Promise<boolean> {
+    this.stopCheckTimer();
+    if (this.songs.length === 0) {
+      songloft.log.warn('[PlaylistManager] playAtIndex: no playlist loaded');
+      return false;
+    }
+    if (index < 0 || index >= this.songs.length) {
+      songloft.log.warn(`[PlaylistManager] playAtIndex: index ${index} out of range (total=${this.songs.length})`);
+      return false;
+    }
+    // 已定好的下一首是按旧下标算的，跳位后必须作废重算，避免自动切歌时又跳回去。
+    this.clearPendingNextIndex();
+    this.currentIndex = index;
+    this.state = 'idle';
+    this.playStartTimeMs = 0;
+    const ok = await this.playCurrent();
+    if (ok) {
+      await this.persistState();
+    }
+    return ok;
+  }
+
+  /**
    * 设置播放模式
    */
   async setPlayMode(mode: PlayMode): Promise<void> {
@@ -822,11 +853,16 @@ export class PlaylistManager {
    *
    * 只改内存不发设备指令：调用方（POST /player/song/remove handler）负责先决定
    * 「删的是不是正在播的那首」——若是，要先切下一首（next() 会持久化并推 URL），
-   * 再回来调本方法把它从队列删掉。
+   * 再回来调本方法把它从队列删掉。这样自动切歌与队列一致性由持久化收口负责，
+   * 本方法不重复触发。
    *
-   * pendingNextIndex 可能指向旧下标，必须清；randomPlayed 记的是下标而非歌曲 id，
-   * 删掉一首后位于其后的下标都要减 1，否则随机模式的「已播过」判断会错位。
-   * 删完必须重新 persistState，避免热重载后按错位下标恢复。
+   * pendingNextIndex 里可能指向旧下标，必须清；randomPlayed 记的是**下标**而非
+   * 歌曲 id，删掉一首后所有位于其后的下标都要减 1，否则随机模式下的"已播过"判断
+   * 会错位。
+   *
+   * 删完必须重新 persistState：调用方若刚 next() 过（删的是正播那首），持久化里存的
+   * 还是**旧队列**的下标，不重存的话热重载后 restoreFromConfig 会恢复到错一位的歌。
+   * 返回 true 表示确有一首被删。
    */
   async removeSongFromMemory(songId: number): Promise<boolean> {
     const idx = this.songs.findIndex(s => s.id === songId);
@@ -850,6 +886,7 @@ export class PlaylistManager {
     await this.persistState();
     return true;
   }
+
   /** 返回该 manager 的固定临时歌单 ID */
   getTempId(): number {
     return this.tempId;
@@ -870,6 +907,13 @@ export class PlaylistManager {
    */
   hasPlaylist(): boolean {
     return this.songs.length > 0;
+  }
+
+  /**
+   * 当前歌单/临时列表的歌曲总数
+   */
+  getTotalSongs(): number {
+    return this.songs.length;
   }
 
   /**
@@ -1713,10 +1757,10 @@ export class PlaylistManager {
    * **云端没等到设备回执**。#98 的日志里三次 play-url 全报这个错，而音箱把最后那个 URL
    * 完整播完了——插件却已经 state='stopped'、定时器不再注册，播完就彻底没有下一首。
    *
-   * status<0（查询也失败）时**按失败处理**，与 verifyResumeOrRepush 刻意相反：那边是
-   * 「拿不到证据就别打断正在放的歌」，这边是「拿不到证据就别把没播上的当成播上了」，
-   * 而且网络全断时立刻返回、不再耗满 2.4s 拖慢上层的重试链。真漏判了还有
-   * advanceToNext 末尾的 startResumePoll 兜着。
+   * status<0（查询也失败）时**继续下一轮探测**，不再立即判失败
+   * （songloft-org/songloft-player#45）：`play-url` 和 `getPlayState` 走同一云端，
+   * 抖动期两个调用会一起不通，早退等于本轮抖动完全没救。整个核实窗口用来等云端恢复，
+   * 窗口用尽仍拿不到证据才真判失败——真漏判还有 advanceToNext 末尾的 startResumePoll 兜着。
    *
    * 只查主设备：分组成员各自的媒体上下文无法逐台核实，与 verifyResumeOrRepush 同一取舍。
    *
@@ -1735,17 +1779,20 @@ export class PlaylistManager {
       if (this.currentIndex !== indexAtPush || (this.getCurrentSong()?.id ?? 0) !== songIdAtPush) {
         return -1;
       }
-      // 核实要等 ~2.4s，期间用户可能按了停止/暂停。翻案会让 playCurrent 把 state 改回 playing
-      // 并注册定时器，等于把用户刚停下的播放又拉起来——宁可维持失败。
+      // 核实要等最多 ~6s（5 × 1.2s），期间用户可能按了停止/暂停。翻案会让 playCurrent 把
+      // state 改回 playing 并注册定时器，等于把用户刚停下的播放又拉起来——宁可维持失败。
       if (this.state !== stateAtPush && (this.state === 'stopped' || this.state === 'paused')) {
         songloft.log.info(`[PlaylistManager] Push verify: state changed to ${this.state} meanwhile, keeping failure`);
         return -1;
       }
 
       const state = await this.minaService.getPlayState(this.accountId, this.deviceId);
+      // status<0 = 查询也失败：`play-url` 和 `getPlayState` 走同一云端，抖动时会一起不通
+      // （songloft-org/songloft-player#45）。旧实现在这里立刻返回 -1，本轮抖动就再也翻不了案。
+      // 改成「本轮无信号，继续下一轮」，让整段核实窗口都用来等云端恢复。
       if (state.status < 0) {
-        songloft.log.warn('[PlaylistManager] Push verify: device status unavailable, keeping failure');
-        return -1;
+        songloft.log.warn(`[PlaylistManager] Push verify: device status unavailable (attempt ${i + 1}/${PUSH_VERIFY_ATTEMPTS}), retrying`);
+        continue;
       }
       if (state.status !== 1) continue;
 
@@ -2338,13 +2385,22 @@ export class PlaylistManager {
       return;
     }
 
-    // 第一次失败（常见于设备超时 code=3012），等 3 秒重试当前歌曲
+    // 常见于设备超时 code=3012。云端秒级抖动通常持续 10~60s，单次 3s 重试命中率过低
+    // （songloft-org/songloft-player#45）：改指数退避多轮，给云端恢复的机会，仍失败才跳下一首。
     const retryIndex = this.currentIndex;
-    songloft.log.warn('[PlaylistManager] Auto-next play failed, retrying in 3s');
-    await new Promise(r => setTimeout(r, 3000));
-    if (this.state !== 'playing' || this.currentIndex !== retryIndex) return;
+    const AUTO_NEXT_RETRY_DELAYS_MS = [3000, 8000];
+    let retryOk = false;
+    for (let attempt = 0; attempt < AUTO_NEXT_RETRY_DELAYS_MS.length; attempt++) {
+      const delayMs = AUTO_NEXT_RETRY_DELAYS_MS[attempt];
+      songloft.log.warn(`[PlaylistManager] Auto-next play failed, retrying in ${delayMs}ms (attempt ${attempt + 1}/${AUTO_NEXT_RETRY_DELAYS_MS.length})`);
+      await new Promise(r => setTimeout(r, delayMs));
+      if (this.state !== 'playing' || this.currentIndex !== retryIndex) return;
 
-    const retryOk = await this.playCurrent({ skipAnnouncement: true });
+      if (await this.playCurrent({ skipAnnouncement: true })) {
+        retryOk = true;
+        break;
+      }
+    }
     if (retryOk) {
       await this.persistState();
       return;

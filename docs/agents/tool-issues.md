@@ -269,3 +269,20 @@
 - 相关链接：本文件 PowerShell here-string 条目、`exec_command` 沙箱条目（同属 PowerShell 文本处理坑）
 - 复现记录：
   - 2026-09-21：本轮文档补丁任务中，嵌套 `powershell -Command` 连续失败 4 次；改用临时 `.cjs` 后成功。
+
+### 2026-09-21 — git / Node.js — 用 patch-id 识别 fork 与上游重复提交时易超时
+
+- 状态：workaround
+- 工具及版本：git（Windows）+ Node.js v26.9.0；仓库含 170+ 个待比对提交
+- 环境：Windows 11 + PowerShell 7；合并 fork 与 upstream 两条长期分叉的 main（fork 侧 87 个独有提交、上游 24 个）
+- 现象：直接 `git cherry` 只能做逐个 patch-id 比对且第一次跑 100 秒仍未结束；在 Node 脚本里对每个提交执行 `git show` + `git patch-id` 需要约 2 分钟才出结果，期间多次到达 exec_command 默认等待上限而被挂起。
+- 原始错误：无报错，表现为长时间无输出、进程被会话挂起（30s/60s poll 多次仍 running）。
+- 根因：`git patch-id` 需要为每个提交生成完整 diff 文本再计算哈希；本仓库单条提交 diff 最大可达数 MB（播放器与前端大文件），O(提交数 × diff 体积) 使总耗时显著高于普通 git 命令的预期。
+- 解决方案或规避方案：
+  1. 预先把 fork 与 upstream 的提交按 patch-id 建映射，再取差集，一次脚本内完成，不要反复启动 git 进程；脚本用 `execSync` + `maxBuffer: 1<<30`。
+  2. 给该命令留足时间（`yield_time_ms` ≥ 30000 并按需继续轮询），不要因 30s 无输出判定失败。
+  3. 合并长分叉时该步骤值得一次跑完：它能准确区分“同一补丁被双方分别提交”（取一边即可）与“仅一方有”（必须保留），比逐个冲突块猜测可靠。
+- 验证：脚本一次跑完列出 87 个 fork 独有提交，并识别出其余本地提交是与上游同 patch-id 的重复补丁；据此确认 `src/playback_sync/` 等仅 fork 有，从而正确保留了本地功能。后续 `npm run typecheck`、`npm test`（255 项）、前端契约测试、`npm run validate`、`npm run build` 全部通过。
+- 相关链接：本文件 Node.js 24 原生跑 TS 测试条目（同属本仓库 Node 工具链限制）
+- 复现记录：
+  - 2026-09-21：合并 upstream/main 时首次跑 patch-id 映射，30s/60s 轮询均未返回；改用缓存 map + 加大 maxBuffer 后仍需约 110s，最终成功。
